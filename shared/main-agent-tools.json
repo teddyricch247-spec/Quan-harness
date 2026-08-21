@@ -1,0 +1,110 @@
+[
+  {
+    "type": "function",
+    "name": "github_list_tree",
+    "description": "List every file path in the repository at the given branch, recursively, in a single call. Use this before any multi-file task, or whenever you are not certain a path exists. Does not return file contents.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "branch": { "type": "string", "description": "Branch to list. Defaults to the repository's default branch if omitted." }
+      },
+      "required": []
+    }
+  },
+  {
+    "type": "function",
+    "name": "github_read_file",
+    "description": "Read the current contents of one file from the repository. Always call this before writing to an existing file — never assume you know its contents.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "File path relative to the repository root, e.g. 'src/App.jsx'." }
+      },
+      "required": ["path"]
+    }
+  },
+  {
+    "type": "function",
+    "name": "github_write_file",
+    "description": "Create a new file or overwrite an existing one. This commits directly to the repository's default branch immediately — there is no staging or review step before this lands. If the file already exists, its entire content is replaced with what you provide, so include the complete file, not a partial diff.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "File path relative to the repository root." },
+        "content": { "type": "string", "description": "The complete new content of the file." },
+        "commit_message": { "type": "string", "description": "Short, conventional commit message, e.g. 'feat: add email validation to signup form'." }
+      },
+      "required": ["path", "content", "commit_message"]
+    }
+  },
+  {
+    "type": "function",
+    "name": "github_delete_file",
+    "description": "Delete a file from the repository. Commits directly to the default branch immediately, same as github_write_file.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string" },
+        "commit_message": { "type": "string" }
+      },
+      "required": ["path", "commit_message"]
+    }
+  },
+  {
+    "type": "function",
+    "name": "github_create_repo",
+    "description": "Create a new, empty GitHub repository for a brand-new project. Only call this when no repository exists yet for the current project. Never call this if a repository is already set in context.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "Repository name, kebab-case." },
+        "private": { "type": "boolean", "description": "Whether the repository should be private. Default true." }
+      },
+      "required": ["name"]
+    }
+  },
+  {
+    "type": "function",
+    "name": "vercel_create_project",
+    "description": "Create a new Vercel project linked to the current project's GitHub repository, so pushes start deploying. Call once, right after github_create_repo, for brand-new projects only.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "Vercel project name, kebab-case." }
+      },
+      "required": ["name"]
+    }
+  },
+  {
+    "type": "function",
+    "name": "tavily_search",
+    "description": "Search the web for current information: library APIs, framework docs, current version numbers, specific error messages. Use when you're not confident training data is current — don't use it for things you already know well.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query": { "type": "string", "description": "Search query, 2-6 words, specific." }
+      },
+      "required": ["query"]
+    }
+  },
+  {
+    "type": "function",
+    "name": "vercel_deployment_status",
+    "description": "Check the status of the most recent Vercel deployment for the current project's linked Vercel project. Use after pushing changes if the user would want to know whether the build succeeded.",
+    "parameters": { "type": "object", "properties": {}, "required": [] }
+  },
+  {
+    "type": "function",
+    "name": "finish_task",
+    "description": "Call exactly once, as the last action, when every file change for this request has been written. Nothing after this call is processed — do not call any other tool afterward. Triggers an automatic code review pass on the changes you made.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "summary": { "type": "string", "description": "One or two sentences describing what changed, written for the user." },
+        "memory_update": { "type": "string", "description": "OPTIONAL. Only include if something durable from this turn should be remembered in future sessions on this project. If included, this REPLACES the entire stored memory — write the full updated text, pruning anything now stale. Omit entirely if nothing durable happened." },
+        "stack": { "type": "string", "enum": ["static", "vite", "nextjs"], "description": "OPTIONAL. Only include the first time you decide a brand-new project's stack (when {{STACK}} was empty going into this turn). Omit on every other turn — once set, it's fixed." }
+      },
+      "required": ["summary"]
+    }
+  }
+]
