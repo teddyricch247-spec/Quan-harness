@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { supabase } from './supabaseClient.js';
+import { useBackendKeepAlive } from './lib/useBackendKeepAlive.js';
 import Login from './pages/Login.jsx';
 import ProjectList from './pages/ProjectList.jsx';
 import SessionList from './pages/SessionList.jsx';
@@ -8,6 +9,8 @@ import SessionView from './pages/SessionView.jsx';
 
 export default function App() {
   const [session, setSession] = useState(undefined); // undefined = not checked yet, null = signed out
+
+  useBackendKeepAlive();
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
