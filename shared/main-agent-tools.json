@@ -95,6 +95,18 @@
   },
   {
     "type": "function",
+    "name": "request_critique",
+    "description": "Ask a separate, tool-less second reader to challenge the work you've done so far this turn, in plain language — not a list of fixes. Use it on substantial or ambiguous tasks (a new feature, a redesign, anything spanning multiple files or open to more than one reasonable interpretation), after you have something real to show it, and before calling finish_task. It is NOT the automated correctness check that runs after finish_task — assume your code already runs; this is about whether it's actually good. Capped at two calls per turn: after that it will tell you your budget is used up and to proceed on your own judgment. You decide what to do with what it says — it never writes code or issues a verdict.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "focus": { "type": "string", "description": "OPTIONAL. Something specific you want it to pay attention to, e.g. 'the empty-state UX' or 'whether this duplicates the existing auth logic'. Leave empty for a general pass." }
+      },
+      "required": []
+    }
+  },
+  {
+    "type": "function",
     "name": "finish_task",
     "description": "Call exactly once, as the last action, when every file change for this request has been written. Nothing after this call is processed — do not call any other tool afterward. Triggers an automatic code review pass on the changes you made.",
     "parameters": {

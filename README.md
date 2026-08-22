@@ -79,8 +79,9 @@ in `ReasoningSwitch.jsx` has three real positions: **Low / High / Max**.
 
 It's a per-session setting (`sessions.reasoning_effort` in Postgres), changeable from
 the composer at any time, and it's sent as `reasoning.effort` on every DeepSeek call
-for a turn — both the main agent's tool-calling rounds and the verifier subagent that
-runs after `finish_task`. That's the "applies everywhere" behavior you asked for.
+for a turn — the main agent's tool-calling rounds, the critic (when the agent asks for
+one mid-turn), and the verifier subagent that runs after `finish_task`. That's the
+"applies everywhere" behavior you asked for.
 
 ## A note on the two system prompts
 
@@ -94,6 +95,42 @@ or anywhere else in this conversation. I wrote versions that satisfy every requi
 the spec lists, including the two required edits (the `vercel_create_project` ordering
 rule and the `finish_task` stack-persistence rule). Read through both before you trust
 them with real commits — they're yours to edit, not gospel.
+
+## A third role: the critic (added after the initial build)
+
+The original build had two model roles — the main agent and the verifier. A third,
+the **critic**, was added afterward to address something the verifier was never meant
+to catch: the verifier only checks whether committed code is *broken*, not whether
+it's actually *good*. Nothing in the original design pushed the agent to reconsider
+its own work before calling it done.
+
+The critic closes that gap, and it's deliberately built to not become a second
+verifier:
+
+- **It's optional and agent-initiated.** The main agent decides whether to call it,
+  via a new `request_critique` tool — it's not automatic like the verifier, and the
+  harness doesn't force it. Guidance on when to use it lives in the "Self-critique on
+  hard tasks" section of `shared/main-agent-system-prompt.md`.
+- **It has no tools and returns no structured output.** `shared/critic-system-prompt.md`
+  is its entire briefing: the request, the diffs so far, and project memory — nothing
+  it can read on its own. It replies in plain prose, not JSON, and it never proposes a
+  diff. Contrast with the verifier, which has `github_read_file` and must return
+  corrections that get auto-applied.
+- **It's capped at two calls per turn**, enforced in `backend/src/agent/loop.js`
+  (`MAX_CRITIQUE_CALLS`), not left to the model's discretion — a critic will always
+  find *something* if asked enough times, so the cap exists to stop that from turning
+  into an unproductive loop rather than a genuine second look.
+- **Because every write already commits immediately** (no staging step, see the
+  Boundaries section of the main prompt), acting on a critique just means writing
+  more files before `finish_task` — the same tool, called again. Nothing new was
+  needed to support that.
+
+Relevant files: `shared/critic-system-prompt.md` (new), `backend/src/agent/critic.js`
+(new, mirrors `verifier.js` but with no tool loop and no schema), the `request_critique`
+entry in `shared/main-agent-tools.json`, and the dispatch branch in
+`backend/src/agent/loop.js` alongside `finish_task`'s. Critique text, when the critic
+is actually called, is stored on the turn summary as `critique_notes` and shown in the
+UI next to the verifier's notes (`SessionView.jsx`).
 
 ## Repo layout
 

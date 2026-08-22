@@ -115,6 +115,11 @@ export default function SessionView() {
               <div className="bubble assistant">
                 <p>{turn.summary.summary}</p>
                 {turn.summary.verifier_notes && <p className="muted small">Verifier: {turn.summary.verifier_notes}</p>}
+                {turn.summary.critique_notes?.map((c, i) => (
+                  <p className="muted small" key={i}>
+                    Critique{c.focus ? ` (${c.focus})` : ''}: {c.critique}
+                  </p>
+                ))}
                 {turn.summary.deployment_status && (
                   <p className="muted small">Deploy: {turn.summary.deployment_status.state}</p>
                 )}

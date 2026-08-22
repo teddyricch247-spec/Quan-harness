@@ -86,6 +86,15 @@ export const toolHandlers = {
   async finish_task(args, _ctx) {
     return { received: true, summary: args.summary };
   },
+
+  // Same story as finish_task: agent/loop.js special-cases request_critique before
+  // ever reaching executeTool, because it needs to call a second model and enforce a
+  // cross-call budget — neither fits the plain (args, ctx) → result shape every other
+  // handler here uses. This entry exists only so the dispatch table stays complete
+  // and defensive against a future refactor that routes it through executeTool.
+  async request_critique(_args, _ctx) {
+    throw new Error('request_critique is handled directly in agent/loop.js and should never reach executeTool.');
+  },
 };
 
 function requireRepo(ctx) {
