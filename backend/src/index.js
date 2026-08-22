@@ -4,6 +4,7 @@ import { config } from './config.js';
 import { requireAuth } from './auth/middleware.js';
 import projectsRouter from './routes/projects.js';
 import sessionsRouter from './routes/sessions.js';
+import metaRouter from './routes/meta.js';
 
 const app = express();
 
@@ -14,6 +15,7 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
 
 app.use('/api/projects', requireAuth, projectsRouter);
 app.use('/api/sessions', requireAuth, sessionsRouter);
+app.use('/api/meta', requireAuth, metaRouter);
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found.' });

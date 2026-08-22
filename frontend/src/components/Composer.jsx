@@ -1,7 +1,18 @@
 import { useState } from 'react';
 import ReasoningSwitch from './ReasoningSwitch.jsx';
+import ProviderSwitch from './ProviderSwitch.jsx';
 
-export default function Composer({ effort, onEffortChange, onSend, busy }) {
+export default function Composer({
+  effort,
+  efforts,
+  onEffortChange,
+  provider,
+  providers,
+  onProviderChange,
+  onSend,
+  busy,
+  placeholder,
+}) {
   const [text, setText] = useState('');
 
   function handleSubmit(e) {
@@ -21,13 +32,16 @@ export default function Composer({ effort, onEffortChange, onSend, busy }) {
 
   return (
     <form onSubmit={handleSubmit} className="composer">
-      <ReasoningSwitch value={effort} onChange={onEffortChange} disabled={busy} />
+      <div className="composer-switches">
+        <ProviderSwitch value={provider} onChange={onProviderChange} disabled={busy} providers={providers} />
+        <ReasoningSwitch value={effort} onChange={onEffortChange} disabled={busy} efforts={efforts} />
+      </div>
       <div className="composer-row">
         <textarea
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder={busy ? 'Working…' : 'Describe what to change…'}
+          placeholder={busy ? 'Working…' : placeholder || 'Describe what to change…'}
           disabled={busy}
           rows={2}
         />

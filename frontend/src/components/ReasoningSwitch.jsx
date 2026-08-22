@@ -1,25 +1,26 @@
-const LEVELS = [
-  { value: 'low', label: 'Low' },
-  { value: 'high', label: 'High' },
-  { value: 'max', label: 'Max' },
-];
+function label(level) {
+  return level.charAt(0).toUpperCase() + level.slice(1);
+}
 
-// Only three positions on purpose — see README "About the thinking switch" for why
-// there's no separate "Medium". Whatever is selected here is sent as
-// reasoning.effort on every DeepSeek call for the turn: the main agent's rounds AND
-// the verifier that runs after finish_task.
-export default function ReasoningSwitch({ value, onChange, disabled }) {
+// Positions come from whichever provider the session is currently using (see
+// ProviderSwitch.jsx + SessionView.jsx) rather than being hardcoded here — DeepSeek
+// exposes low/high/max (see README "About the thinking switch" for why there's no
+// separate "medium"), but a custom provider might expose a different set, or none at
+// all, in which case this renders nothing.
+export default function ReasoningSwitch({ value, onChange, disabled, efforts }) {
+  if (!efforts || efforts.length === 0) return null;
+
   return (
     <div className="reasoning-switch" role="group" aria-label="Thinking effort">
-      {LEVELS.map((level) => (
+      {efforts.map((level) => (
         <button
-          key={level.value}
+          key={level}
           type="button"
-          className={value === level.value ? 'active' : ''}
+          className={value === level ? 'active' : ''}
           disabled={disabled}
-          onClick={() => onChange(level.value)}
+          onClick={() => onChange(level)}
         >
-          {level.label}
+          {label(level)}
         </button>
       ))}
     </div>

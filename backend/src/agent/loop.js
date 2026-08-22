@@ -1,12 +1,13 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { createResponse, extractFunctionCalls } from '../services/deepseek.js';
+import { createResponse, extractFunctionCalls } from '../services/responsesApiClient.js';
 import { executeTool, makeProjectUpdater } from './tools.js';
 import { runVerifier } from './verifier.js';
 import { runCritique } from './critic.js';
 import { fillTemplate } from './promptTemplate.js';
 import { safeParseArgs } from './util.js';
+import { loadMessageRows, loadHistoryItems, saveRow } from './messageStore.js';
 import { supabaseAdmin } from '../supabaseAdmin.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -24,10 +25,16 @@ const MAX_CRITIQUE_CALLS = 2; // the critic always finds *something* — bound h
  * times) → repeat until finish_task → verifier → deployment status → persist → done.
  * `sse.send(event, data)` writes one SSE frame; failures are swallowed so a dropped
  * client connection never aborts the loop — see the disconnect-tolerance note below.
+ *
+ * `provider` is the resolved entry from config.js's `providers` registry (not just an
+ * id) — see routes/sessions.js, which looks it up once per request and passes the
+ * same object through to the verifier and the critic too, so a turn's main-agent
+ * rounds, its verifier pass, and any self-critique it asks for all hit the same
+ * provider.
  */
-export async function runTurn({ project, session, userText, effort, sse }) {
+export async function runTurn({ project, session, userText, provider, effort, sse }) {
   const priorRows = await loadMessageRows(session.id);
-  const history = priorRows.map(rowToInputItem);
+  const history = loadHistoryItems(priorRows);
 
   await saveRow(session.id, 'user', { text: userText });
 
@@ -42,6 +49,7 @@ export async function runTurn({ project, session, userText, effort, sse }) {
 
   for (let round = 0; round < MAX_ROUNDS && !finishArgs; round += 1) {
     const { outputItems } = await createResponse({
+      provider,
       instructions,
       input,
       tools: mainTools,
@@ -92,6 +100,7 @@ export async function runTurn({ project, session, userText, effort, sse }) {
               taskText: userText,
               diffsSoFar: diffsThisTurn,
               focus: args.focus,
+              provider,
               effort,
             });
             critiquesThisTurn.push({ round: critiqueCallsUsed, focus: args.focus || null, critique: critiqueResult.critique });
@@ -130,7 +139,7 @@ export async function runTurn({ project, session, userText, effort, sse }) {
 
   let verifierNotes = null;
   if (diffsThisTurn.length > 0) {
-    const verifierResult = await runVerifier({ project, summary: finishArgs.summary, diffs: diffsThisTurn, effort });
+    const verifierResult = await runVerifier({ project, summary: finishArgs.summary, diffs: diffsThisTurn, provider, effort });
     verifierNotes = verifierResult.notes || null;
     if (verifierResult.issues_found && verifierResult.corrections?.length) {
       for (const correction of verifierResult.corrections) {
@@ -187,25 +196,4 @@ function buildInstructions(project) {
     VERCEL_PROJECT_ID: project.vercel_project_id,
     PROJECT_MEMORY: project.memory,
   });
-}
-
-async function loadMessageRows(sessionId) {
-  const { data, error } = await supabaseAdmin
-    .from('messages')
-    .select('role, content, created_at')
-    .eq('session_id', sessionId)
-    .order('created_at', { ascending: true });
-  if (error) throw new Error(`Failed to load session history: ${error.message}`);
-  return data || [];
-}
-
-async function saveRow(sessionId, role, content) {
-  const { error } = await supabaseAdmin.from('messages').insert({ session_id: sessionId, role, content });
-  if (error) throw new Error(`Failed to persist message: ${error.message}`);
-}
-
-/** Turns a stored row back into a Responses API input[] item, exactly as it was sent originally. */
-function rowToInputItem(row) {
-  if (row.role === 'user') return { role: 'user', content: row.content.text };
-  return row.content; // assistant → raw message/function_call item; tool → function_call_output item
 }

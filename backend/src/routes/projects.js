@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { supabaseAdmin } from '../supabaseAdmin.js';
+import { config, defaultEffortFor } from '../config.js';
 
 const router = Router();
 
@@ -39,9 +40,24 @@ router.get('/:id/sessions', async (req, res) => {
 
 router.post('/:id/sessions', async (req, res) => {
   const title = (req.body.title || '').trim() || 'New session';
+  // Prompt-maker is the default mode: unless the frontend explicitly asks for a
+  // direct build session, every new session starts as an interview.
+  const kind = req.body.kind === 'build' ? 'build' : 'interview';
+
+  const providerId = typeof req.body.provider === 'string' && config.providers[req.body.provider]
+    ? req.body.provider
+    : 'deepseek';
+  const provider = config.providers[providerId];
+
   const { data, error } = await supabaseAdmin
     .from('sessions')
-    .insert({ project_id: req.params.id, title })
+    .insert({
+      project_id: req.params.id,
+      title,
+      kind,
+      provider: providerId,
+      reasoning_effort: defaultEffortFor(provider),
+    })
     .select()
     .single();
   if (error) return res.status(500).json({ error: error.message });

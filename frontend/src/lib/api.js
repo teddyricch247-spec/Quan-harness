@@ -29,10 +29,14 @@ export const api = {
   createProject: (name, githubRepo) => apiFetch('/api/projects', { method: 'POST', body: JSON.stringify({ name, github_repo: githubRepo }) }),
   getProject: (id) => apiFetch(`/api/projects/${id}`),
   listSessions: (projectId) => apiFetch(`/api/projects/${projectId}/sessions`),
-  createSession: (projectId, title) => apiFetch(`/api/projects/${projectId}/sessions`, { method: 'POST', body: JSON.stringify({ title }) }),
+  createSession: (projectId, title, kind) =>
+    apiFetch(`/api/projects/${projectId}/sessions`, { method: 'POST', body: JSON.stringify({ title, kind }) }),
   updateSession: (sessionId, patch) => apiFetch(`/api/sessions/${sessionId}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   getSession: (sessionId) => apiFetch(`/api/sessions/${sessionId}`),
   listMessages: (sessionId) => apiFetch(`/api/sessions/${sessionId}/messages`),
+  // { providers: [{ id, label, reasoningEfforts }] } — just 'deepseek' unless a
+  // custom provider is configured on the backend.
+  getMeta: () => apiFetch('/api/meta'),
   backendUrl: BACKEND_URL,
   authHeader,
 };

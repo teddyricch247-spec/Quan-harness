@@ -271,3 +271,95 @@ button.ghost {
   background: var(--accent);
   color: #fff;
 }
+
+.composer-switches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+/* Same look as .reasoning-switch, kept as a distinct class in case they ever need to
+   diverge (e.g. more than a handful of providers). */
+.provider-switch {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+  align-self: flex-start;
+}
+
+.provider-switch button {
+  background: var(--bg);
+  color: var(--fg);
+  border: none;
+  border-radius: 0;
+  padding: 0.3rem 0.65rem;
+  font-size: 0.85rem;
+}
+
+.provider-switch button + button {
+  border-left: 1px solid var(--border);
+}
+
+.provider-switch button.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* Prompt Maker / Direct build toggle on the "new session" card */
+
+.mode-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+  align-self: flex-start;
+}
+
+.mode-toggle button {
+  background: var(--bg);
+  color: var(--fg);
+  border: none;
+  border-radius: 0;
+  padding: 0.4rem 0.75rem;
+}
+
+.mode-toggle button + button {
+  border-left: 1px solid var(--border);
+}
+
+.mode-toggle button.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* Small pill used next to a session title (kind badges) or in a page header */
+
+.badge {
+  display: inline-block;
+  background: var(--bg-alt);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.1rem 0.55rem;
+  font-size: 0.75rem;
+  vertical-align: middle;
+}
+
+.badge.small {
+  margin-left: 0.4rem;
+  font-size: 0.7rem;
+}
+
+.bubble.assistant.handoff {
+  border-color: var(--accent);
+}
+
+.composer-locked {
+  position: sticky;
+  bottom: 0;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+  padding-top: 0.6rem;
+  margin-top: 1rem;
+}

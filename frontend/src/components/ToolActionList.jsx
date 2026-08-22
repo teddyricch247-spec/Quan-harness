@@ -17,10 +17,12 @@ function describe(action) {
       return `searched "${args.query}"`;
     case 'vercel_deployment_status':
       return 'checked deployment status';
-    case 'request_critique':
-      return `asked for a second opinion${args.focus ? ` (${args.focus})` : ''}`;
     case 'finish_task':
       return 'finished';
+    case 'request_critique':
+      return `asked for a second opinion${args.focus ? ` (${args.focus})` : ''}`;
+    case 'finalize_prompt':
+      return `finalized the prompt: "${args.title}"`;
     default:
       return name;
   }

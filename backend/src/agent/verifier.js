@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { createResponse, extractFunctionCalls } from '../services/deepseek.js';
+import { createResponse, extractFunctionCalls } from '../services/responsesApiClient.js';
 import { executeTool } from './tools.js';
 import { safeParseArgs } from './util.js';
 
@@ -20,7 +20,7 @@ const MAX_VERIFIER_TOOL_ROUNDS = 6;
  * repo the main agent was just working in (ctx.project comes from the caller so the
  * model itself never chooses a repo).
  */
-export async function runVerifier({ project, summary, diffs, effort }) {
+export async function runVerifier({ project, summary, diffs, provider, effort }) {
   const diffsBlock = diffs
     .map((d) => `### ${d.path} (${d.op})\n\n\`\`\`\n${d.content ?? '(deleted)'}\n\`\`\``)
     .join('\n\n');
@@ -38,7 +38,7 @@ export async function runVerifier({ project, summary, diffs, effort }) {
 
   const ctx = { project, updateProject: async () => {} }; // verifier never mutates the project row
 
-  const finalText = await runToolLoop(input, verifierTools, effort, ctx);
+  const finalText = await runToolLoop(input, verifierTools, provider, effort, ctx);
   const parsed = tryParse(finalText);
   if (parsed) return parsed;
 
@@ -53,17 +53,18 @@ export async function runVerifier({ project, summary, diffs, effort }) {
         'That response was not valid JSON matching the required schema. Reply with ONLY the JSON object — no prose, no code fence.',
     },
   ];
-  const retryText = await runToolLoop(retryInput, verifierTools, effort, ctx);
+  const retryText = await runToolLoop(retryInput, verifierTools, provider, effort, ctx);
   const retryParsed = tryParse(retryText);
   if (retryParsed) return retryParsed;
 
   return { issues_found: false, notes: 'Verifier output was malformed after one retry; skipped.', corrections: [] };
 }
 
-async function runToolLoop(initialInput, tools, effort, ctx) {
+async function runToolLoop(initialInput, tools, provider, effort, ctx) {
   let input = initialInput;
   for (let round = 0; round < MAX_VERIFIER_TOOL_ROUNDS; round += 1) {
     const { outputItems, textOutput } = await createResponse({
+      provider,
       instructions: verifierPrompt,
       input,
       tools,

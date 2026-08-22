@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { createResponse } from '../services/deepseek.js';
+import { createResponse } from '../services/responsesApiClient.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const sharedDir = path.join(__dirname, '..', '..', '..', 'shared');
@@ -19,8 +19,12 @@ const criticPrompt = readFileSync(path.join(sharedDir, 'critic-system-prompt.md'
  * a tool loop, and returns structured corrections that get auto-applied. The critic
  * is a second opinion on whether the work is any good, not a check for breakage —
  * its output is meant to be read and judged by the main agent, never applied as-is.
+ *
+ * `provider` is the same resolved registry entry (see config.js) the rest of the
+ * turn is using — passed through explicitly rather than read from global config, so
+ * the critic always runs on whichever provider the session is actually set to.
  */
-export async function runCritique({ project, taskText, diffsSoFar, focus, effort }) {
+export async function runCritique({ project, taskText, diffsSoFar, focus, provider, effort }) {
   const diffsBlock = diffsSoFar
     .map((d) => `### ${d.path} (${d.op})\n\n\`\`\`\n${d.content ?? '(deleted)'}\n\`\`\``)
     .join('\n\n');
@@ -43,6 +47,7 @@ export async function runCritique({ project, taskText, diffsSoFar, focus, effort
   ];
 
   const { textOutput } = await createResponse({
+    provider,
     instructions: criticPrompt,
     input,
     tools: [],
