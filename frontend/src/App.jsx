@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { supabase } from './supabaseClient.js';
 import { useBackendKeepAlive } from './lib/useBackendKeepAlive.js';
+import UtcPeakClock from './components/UtcPeakClock.jsx';
 import Login from './pages/Login.jsx';
 import ProjectList from './pages/ProjectList.jsx';
 import SessionList from './pages/SessionList.jsx';
@@ -22,6 +23,7 @@ export default function App() {
 
   return (
     <BrowserRouter>
+      <UtcPeakClock />
       <Routes>
         <Route path="/login" element={session ? <Navigate to="/" replace /> : <Login />} />
         <Route path="/" element={session ? <ProjectList /> : <Navigate to="/login" replace />} />

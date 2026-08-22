@@ -44,6 +44,62 @@ h2 {
   margin: 0 0 0.5rem;
 }
 
+/* UTC peak-time clock, shown above every page */
+
+.utc-clock {
+  padding: 0.35rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-alt);
+  font-size: 0.8rem;
+}
+
+.utc-clock-row {
+  max-width: 640px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.utc-clock-time {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.utc-clock-toggle {
+  margin-left: auto;
+  padding: 0 0.4rem;
+  line-height: 1.4;
+  font-size: 0.75rem;
+  border-radius: 999px;
+}
+
+.utc-clock-note {
+  max-width: 640px;
+  margin: 0.2rem auto 0;
+  font-size: 0.75rem;
+}
+
+.utc-clock-peak {
+  background: #fdecea;
+  border-bottom-color: var(--error);
+}
+
+.utc-clock-peak .utc-clock-time {
+  color: var(--error);
+  font-weight: 600;
+}
+
+.utc-clock-peak .utc-clock-badge {
+  background: var(--error);
+  border-color: var(--error);
+  color: #fff;
+}
+
+.utc-clock-peak .utc-clock-note {
+  color: var(--error);
+}
+
 .page {
   max-width: 640px;
   margin: 0 auto;
