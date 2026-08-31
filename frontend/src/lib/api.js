@@ -34,9 +34,22 @@ export const api = {
   updateSession: (sessionId, patch) => apiFetch(`/api/sessions/${sessionId}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   getSession: (sessionId) => apiFetch(`/api/sessions/${sessionId}`),
   listMessages: (sessionId) => apiFetch(`/api/sessions/${sessionId}/messages`),
-  // { providers: [{ id, label, reasoningEfforts }] } — just 'deepseek' unless a
-  // custom provider is configured on the backend.
+  // { providers: [{ id, label, reasoningEfforts }] } — whatever's configured in
+  // Settings; empty until at least one provider is added there.
   getMeta: () => apiFetch('/api/meta'),
+
+  // Settings — BYOK model providers and other API keys (GitHub, Vercel, Tavily, ...).
+  // apiKey/value are only ever sent up, never back down — the backend returns a
+  // masked preview (apiKeyPreview) / a hasValue flag instead of the real thing.
+  listProviderSettings: () => apiFetch('/api/settings/providers'),
+  saveProviderSetting: (id, patch) =>
+    apiFetch(`/api/settings/providers/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(patch) }),
+  deleteProviderSetting: (id) => apiFetch(`/api/settings/providers/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  listSecrets: () => apiFetch('/api/settings/secrets'),
+  saveSecret: (key, value, label) =>
+    apiFetch(`/api/settings/secrets/${encodeURIComponent(key)}`, { method: 'PUT', body: JSON.stringify({ value, label }) }),
+  deleteSecret: (key) => apiFetch(`/api/settings/secrets/${encodeURIComponent(key)}`, { method: 'DELETE' }),
+
   backendUrl: BACKEND_URL,
   authHeader,
 };

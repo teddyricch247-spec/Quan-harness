@@ -1,18 +1,19 @@
-import { config } from '../config.js';
+import { getVercelToken, getVercelTeamId } from './settingsStore.js';
 
 const API = 'https://api.vercel.com';
 
 function withTeam(path) {
-  if (!config.vercelTeamId) return path;
+  const teamId = getVercelTeamId();
+  if (!teamId) return path;
   const sep = path.includes('?') ? '&' : '?';
-  return `${path}${sep}teamId=${encodeURIComponent(config.vercelTeamId)}`;
+  return `${path}${sep}teamId=${encodeURIComponent(teamId)}`;
 }
 
 async function vc(path, options = {}) {
   const res = await fetch(`${API}${withTeam(path)}`, {
     ...options,
     headers: {
-      Authorization: `Bearer ${config.vercelToken}`,
+      Authorization: `Bearer ${getVercelToken()}`,
       ...(options.body ? { 'Content-Type': 'application/json' } : {}),
       ...options.headers,
     },

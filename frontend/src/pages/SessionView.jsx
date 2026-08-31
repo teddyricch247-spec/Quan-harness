@@ -5,6 +5,8 @@ import { streamTurn } from '../lib/sseStream.js';
 import Composer from '../components/Composer.jsx';
 import ThinkingBlock from '../components/ThinkingBlock.jsx';
 import ToolActionList from '../components/ToolActionList.jsx';
+import MessageBubble from '../components/MessageBubble.jsx';
+import ErrorBanner from '../components/ErrorBanner.jsx';
 
 function safeParse(raw) {
   try {
@@ -22,16 +24,27 @@ function extractMessageText(item) {
     .join('');
 }
 
+function extractReasoningText(item) {
+  if (!item?.content) return '';
+  return item.content
+    .filter((c) => c.type === 'reasoning_text')
+    .map((c) => c.text)
+    .join('');
+}
+
 // Rows in the messages table are the raw Responses-API items (see backend
 // agent/loop.js). Group them back into one card per user turn for display: the
-// user's text, the tool calls that turn made, and its final finish_task summary.
+// user's text, what it thought, the tool calls that turn made, and its final
+// finish_task summary.
 function groupIntoBuildTurns(rows) {
   const turns = [];
   let current = null;
   for (const row of rows) {
     if (row.role === 'user') {
-      current = { key: row.id, userText: row.content.text, actions: [], summary: null };
+      current = { key: row.id, userText: row.content.text, thinking: '', actions: [], summary: null };
       turns.push(current);
+    } else if (row.role === 'assistant' && row.content?.type === 'reasoning' && current) {
+      current.thinking += extractReasoningText(row.content);
     } else if (row.role === 'assistant' && row.content?.type === 'function_call' && current) {
       current.actions.push({ name: row.content.name, arguments: safeParse(row.content.arguments) });
     } else if (row.role === 'assistant' && row.content?.type === 'turn_summary' && current) {
@@ -43,8 +56,8 @@ function groupIntoBuildTurns(rows) {
 
 // Interview sessions are conversational — every assistant message is something the
 // user actually needs to read and respond to, not just a final summary, so this keeps
-// each block (text / tool action / handoff) in the order it happened rather than
-// collapsing a turn down to one line.
+// each block (thinking / text / tool action / handoff) in the order it happened
+// rather than collapsing a turn down to one line.
 function groupIntoInterviewTurns(rows) {
   const turns = [];
   let current = null;
@@ -52,6 +65,9 @@ function groupIntoInterviewTurns(rows) {
     if (row.role === 'user') {
       current = { key: row.id, userText: row.content.text, blocks: [] };
       turns.push(current);
+    } else if (row.role === 'assistant' && row.content?.type === 'reasoning' && current) {
+      const text = extractReasoningText(row.content);
+      if (text) current.blocks.push({ kind: 'thinking', text });
     } else if (row.role === 'assistant' && row.content?.type === 'message' && current) {
       const text = extractMessageText(row.content);
       if (text) current.blocks.push({ kind: 'text', text });
@@ -68,6 +84,51 @@ function groupIntoInterviewTurns(rows) {
     }
   }
   return turns;
+}
+
+// Click-to-rename session title. Falls back to the session id trailing edge label
+// ("…") while the session is still loading, same as before.
+function SessionTitle({ title, onSave }) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(title || '');
+
+  useEffect(() => {
+    if (!editing) setValue(title || '');
+  }, [title, editing]);
+
+  if (editing) {
+    return (
+      <input
+        className="session-title-input"
+        value={value}
+        autoFocus
+        onChange={(e) => setValue(e.target.value)}
+        onFocus={(e) => e.target.select()}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            commit();
+          } else if (e.key === 'Escape') {
+            setValue(title || '');
+            setEditing(false);
+          }
+        }}
+      />
+    );
+  }
+
+  function commit() {
+    setEditing(false);
+    const trimmed = value.trim();
+    if (trimmed && trimmed !== title) onSave(trimmed);
+  }
+
+  return (
+    <h1 className="session-title" onClick={() => setEditing(true)} title="Click to rename">
+      {title || '…'}
+    </h1>
+  );
 }
 
 export default function SessionView() {
@@ -143,6 +204,15 @@ export default function SessionView() {
     }
   }
 
+  async function handleRename(title) {
+    try {
+      const updated = await api.updateSession(sessionId, { title });
+      setSession(updated);
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
   function handleSend(text) {
     setError(null);
     setLive({ thinking: '', content: '', actions: [] });
@@ -157,6 +227,9 @@ export default function SessionView() {
           break;
         case 'tool_call':
           setLive((l) => (l ? { ...l, actions: [...l.actions, { name: data.name, arguments: data.arguments }] } : l));
+          break;
+        case 'session_title':
+          setSession((s) => (s ? { ...s, title: data.title } : s));
           break;
         case 'handoff':
           setLive(null);
@@ -187,28 +260,35 @@ export default function SessionView() {
         <Link to={`/project/${projectId}`} className="back-link">
           ← Sessions
         </Link>
-        <h1>{session?.title || '…'}</h1>
-        {isInterview && <span className="badge">Prompt Maker</span>}
-        {session?.kind === 'build' && session?.origin_session_id && (
-          <Link className="muted small" to={`/project/${projectId}/session/${session.origin_session_id}`}>
-            ← from prompt maker
-          </Link>
-        )}
+        <div className="page-header-row">
+          <SessionTitle title={session?.title} onSave={handleRename} />
+          {isInterview && <span className="badge">Prompt Maker</span>}
+          {session?.kind === 'build' && session?.origin_session_id && (
+            <Link className="muted small" to={`/project/${projectId}/session/${session.origin_session_id}`}>
+              ← from prompt maker
+            </Link>
+          )}
+        </div>
       </header>
 
-      {error && <p className="error">{error}</p>}
+      <ErrorBanner message={error} onDismiss={() => setError(null)} />
 
       <div className="turns">
         {isInterview
           ? interviewTurns.map((turn) => (
               <div className="turn" key={turn.key}>
-                <div className="bubble user">{turn.userText}</div>
+                <MessageBubble role="user" copyText={turn.userText}>
+                  {turn.userText}
+                </MessageBubble>
                 {turn.blocks.map((block, i) => {
+                  if (block.kind === 'thinking') {
+                    return <ThinkingBlock key={i} text={block.text} />;
+                  }
                   if (block.kind === 'text') {
                     return (
-                      <div className="bubble assistant" key={i}>
+                      <MessageBubble role="assistant" copyText={block.text} key={i}>
                         {block.text}
-                      </div>
+                      </MessageBubble>
                     );
                   }
                   if (block.kind === 'actions') {
@@ -216,10 +296,10 @@ export default function SessionView() {
                   }
                   if (block.kind === 'handoff') {
                     return (
-                      <div className="bubble assistant handoff" key={i}>
+                      <MessageBubble role="assistant" className="handoff" key={i}>
                         Prompt ready — opened build session{' '}
                         <Link to={`/project/${projectId}/session/${block.sessionId}`}>{block.title}</Link>.
-                      </div>
+                      </MessageBubble>
                     );
                   }
                   return null;
@@ -228,10 +308,13 @@ export default function SessionView() {
             ))
           : buildTurns.map((turn) => (
               <div className="turn" key={turn.key}>
-                <div className="bubble user">{turn.userText}</div>
+                <MessageBubble role="user" copyText={turn.userText}>
+                  {turn.userText}
+                </MessageBubble>
+                {turn.thinking && <ThinkingBlock text={turn.thinking} />}
                 <ToolActionList actions={turn.actions} />
                 {turn.summary ? (
-                  <div className="bubble assistant">
+                  <MessageBubble role="assistant" copyText={turn.summary.summary}>
                     <p>{turn.summary.summary}</p>
                     {turn.summary.verifier_notes && <p className="muted small">Verifier: {turn.summary.verifier_notes}</p>}
                     {turn.summary.critique_notes?.map((c, i) => (
@@ -242,7 +325,7 @@ export default function SessionView() {
                     {turn.summary.deployment_status && (
                       <p className="muted small">Deploy: {turn.summary.deployment_status.state}</p>
                     )}
-                  </div>
+                  </MessageBubble>
                 ) : (
                   !live && <p className="muted small">(no summary recorded for this turn)</p>
                 )}
@@ -252,7 +335,7 @@ export default function SessionView() {
         {live && (
           <div className="turn">
             <ThinkingBlock text={live.thinking} live />
-            {live.content && <div className="bubble assistant">{live.content}</div>}
+            {live.content && <MessageBubble role="assistant">{live.content}</MessageBubble>}
             <ToolActionList actions={live.actions} />
           </div>
         )}

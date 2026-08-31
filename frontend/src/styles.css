@@ -1,6 +1,7 @@
 /* Deliberately plain. System fonts, one accent color, no illustrations, no animation
    libraries. This is a personal tool used from a phone — it should be legible and
-   fast, not a design showcase. */
+   fast, not a design showcase. Light and dark share the same tokens; dark just
+   overrides them below. */
 
 :root {
   --fg: #1a1a1a;
@@ -9,8 +10,24 @@
   --bg: #ffffff;
   --bg-alt: #f4f4f4;
   --accent: #2454ff;
+  --accent-fg: #ffffff;
   --error: #b3261e;
+  --error-bg: #fdecea;
+  --error-fg: #ffffff;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+:root[data-theme="dark"] {
+  --fg: #e9e9e7;
+  --muted: #9b9b95;
+  --border: #333331;
+  --bg: #131312;
+  --bg-alt: #1e1e1c;
+  --accent: #5b93ff;
+  --accent-fg: #0c1424;
+  --error: #ff7a70;
+  --error-bg: #3a1f1d;
+  --error-fg: #2a0a08;
 }
 
 * {
@@ -23,6 +40,10 @@ body {
   background: var(--bg);
   font-size: 16px;
   line-height: 1.4;
+}
+
+body, .bubble, .card, .list-row, input, textarea, button {
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 }
 
 button, input, textarea {
@@ -44,7 +65,12 @@ h2 {
   margin: 0 0 0.5rem;
 }
 
-/* UTC peak-time clock, shown above every page */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* UTC peak-time clock + global controls, shown above every page */
 
 .utc-clock {
   padding: 0.35rem 1rem;
@@ -66,8 +92,14 @@ h2 {
   color: var(--muted);
 }
 
-.utc-clock-toggle {
+.utc-clock-right {
   margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.utc-clock-toggle {
   padding: 0 0.4rem;
   line-height: 1.4;
   font-size: 0.75rem;
@@ -81,7 +113,7 @@ h2 {
 }
 
 .utc-clock-peak {
-  background: #fdecea;
+  background: var(--error-bg);
   border-bottom-color: var(--error);
 }
 
@@ -93,7 +125,7 @@ h2 {
 .utc-clock-peak .utc-clock-badge {
   background: var(--error);
   border-color: var(--error);
-  color: #fff;
+  color: var(--error-fg);
 }
 
 .utc-clock-peak .utc-clock-note {
@@ -114,12 +146,32 @@ h2 {
   max-width: 360px;
 }
 
+@media (min-width: 720px) {
+  .page {
+    max-width: 760px;
+    padding: 1.5rem;
+    padding-bottom: 6rem;
+  }
+
+  .utc-clock-row,
+  .utc-clock-note {
+    max-width: 760px;
+  }
+}
+
 .page-header {
+  margin-bottom: 1rem;
+}
+
+.page-header .back-link {
+  display: inline-block;
+  margin-bottom: 0.35rem;
+}
+
+.page-header-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  margin-bottom: 1rem;
+  gap: 0.6rem;
   flex-wrap: wrap;
 }
 
@@ -138,6 +190,29 @@ h2 {
 
 .error {
   color: var(--error);
+}
+
+.error-banner {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.6rem 0.75rem;
+  margin-bottom: 1rem;
+  border: 1px solid var(--error);
+  border-radius: 6px;
+  background: var(--error-bg);
+  color: var(--error);
+  font-size: 0.9rem;
+}
+
+.error-dismiss {
+  border: none;
+  background: none;
+  color: inherit;
+  padding: 0 0.2rem;
+  line-height: 1;
+  font-size: 1.1rem;
 }
 
 .stack {
@@ -162,7 +237,7 @@ input, textarea {
 }
 
 textarea {
-  resize: vertical;
+  resize: none;
   min-height: 2.5rem;
 }
 
@@ -171,7 +246,7 @@ button {
   border: 1px solid var(--accent);
   border-radius: 4px;
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-fg);
   cursor: pointer;
 }
 
@@ -184,6 +259,14 @@ button.ghost {
   background: transparent;
   color: var(--fg);
   border-color: var(--border);
+}
+
+button.ghost:hover:not(:disabled) {
+  background: var(--bg-alt);
+}
+
+.theme-toggle {
+  min-width: 3.2rem;
 }
 
 .card {
@@ -202,14 +285,24 @@ button.ghost {
   gap: 0.5rem;
 }
 
-.list li {
-  padding: 0.5rem;
-  border: 1px solid var(--border);
-  border-radius: 4px;
+.list-row {
   display: flex;
-  justify-content: space-between;
+  align-items: center;
   gap: 0.5rem;
   flex-wrap: wrap;
+  padding: 0.7rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  text-decoration: none;
+  color: inherit;
+}
+
+.list-row > :last-child {
+  margin-left: auto;
+}
+
+.list-row:hover {
+  background: var(--bg-alt);
 }
 
 /* Session view */
@@ -227,6 +320,23 @@ button.ghost {
   gap: 0.4rem;
 }
 
+.bubble-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  max-width: 85%;
+}
+
+.bubble-row.user {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+
+.bubble-row.assistant {
+  align-self: flex-start;
+  align-items: flex-start;
+}
+
 .bubble {
   padding: 0.6rem 0.75rem;
   border-radius: 6px;
@@ -236,13 +346,56 @@ button.ghost {
 
 .bubble.user {
   background: var(--bg-alt);
-  align-self: flex-end;
-  max-width: 85%;
 }
 
 .bubble.assistant {
   border: 1px solid var(--border);
-  max-width: 85%;
+}
+
+.bubble.assistant.handoff {
+  border-color: var(--accent);
+}
+
+.bubble-actions {
+  display: flex;
+}
+
+.copy-btn {
+  padding: 0.2rem;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+}
+
+.copy-btn:hover {
+  color: var(--fg);
+  background: var(--bg-alt);
+}
+
+.session-title {
+  cursor: text;
+  border-radius: 4px;
+  padding: 0.1rem 0.3rem;
+  margin-left: -0.3rem;
+}
+
+.session-title:hover {
+  background: var(--bg-alt);
+}
+
+.session-title-input {
+  font-size: 1.25rem;
+  font-weight: 600;
+  padding: 0.05rem 0.25rem;
+  margin-left: -0.3rem;
+  width: auto;
+  min-width: 8rem;
+  flex: 1;
 }
 
 .thinking-block {
@@ -251,6 +404,9 @@ button.ghost {
 }
 
 .thinking-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
   border: none;
   padding: 0;
   background: none;
@@ -259,12 +415,32 @@ button.ghost {
   cursor: pointer;
 }
 
+.thinking-caret {
+  font-size: 0.7rem;
+}
+
 .thinking-text {
   margin: 0.35rem 0 0;
   color: var(--muted);
   font-size: 0.85rem;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.thinking-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 0.9em;
+  margin-left: 1px;
+  background: var(--muted);
+  vertical-align: text-bottom;
+  animation: thinking-blink 1s step-start infinite;
+}
+
+@keyframes thinking-blink {
+  50% {
+    opacity: 0;
+  }
 }
 
 .tool-actions {
@@ -325,7 +501,7 @@ button.ghost {
 
 .reasoning-switch button.active {
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-fg);
 }
 
 .composer-switches {
@@ -359,7 +535,7 @@ button.ghost {
 
 .provider-switch button.active {
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-fg);
 }
 
 /* Prompt Maker / Direct build toggle on the "new session" card */
@@ -386,7 +562,7 @@ button.ghost {
 
 .mode-toggle button.active {
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-fg);
 }
 
 /* Small pill used next to a session title (kind badges) or in a page header */
@@ -407,10 +583,6 @@ button.ghost {
   font-size: 0.7rem;
 }
 
-.bubble.assistant.handoff {
-  border-color: var(--accent);
-}
-
 .composer-locked {
   position: sticky;
   bottom: 0;
@@ -418,4 +590,61 @@ button.ghost {
   border-top: 1px solid var(--border);
   padding-top: 0.6rem;
   margin-top: 1rem;
+}
+
+/* Lets a <Link> (an <a>) sit in the global header strip (.utc-clock-right) looking
+   exactly like the button.ghost controls next to it (ThemeToggle, Sign out). */
+
+a.button-like {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.5rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+a.button-like:hover {
+  background: var(--bg-alt);
+}
+
+/* Settings page */
+
+.settings-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.settings-item-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-item-main p {
+  margin: 0.15rem 0 0;
+  word-break: break-word;
+}
+
+.settings-item-actions {
+  display: flex;
+  gap: 0.4rem;
+  flex-shrink: 0;
+}
+
+.form-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+code {
+  background: var(--bg-alt);
+  border-radius: 3px;
+  padding: 0.05rem 0.3rem;
+  font-size: 0.85em;
 }

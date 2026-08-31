@@ -1,4 +1,4 @@
-import { config } from '../config.js';
+import { getGithubToken } from './settingsStore.js';
 
 const API = 'https://api.github.com';
 
@@ -6,7 +6,7 @@ async function gh(path, options = {}) {
   const res = await fetch(`${API}${path}`, {
     ...options,
     headers: {
-      Authorization: `Bearer ${config.githubToken}`,
+      Authorization: `Bearer ${getGithubToken()}`,
       Accept: 'application/vnd.github+json',
       'X-GitHub-Api-Version': '2022-11-28',
       ...(options.body ? { 'Content-Type': 'application/json' } : {}),

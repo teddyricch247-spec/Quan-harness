@@ -2,7 +2,9 @@ import { Router } from 'express';
 import { supabaseAdmin } from '../supabaseAdmin.js';
 import { runTurn } from '../agent/loop.js';
 import { runInterviewTurn } from '../agent/interviewLoop.js';
-import { config, defaultEffortFor } from '../config.js';
+import { generateSessionTitle } from '../agent/titleGenerator.js';
+import { defaultEffortFor } from '../config.js';
+import { getProviderSync, listProvidersSync } from '../services/settingsStore.js';
 
 const router = Router();
 
@@ -34,19 +36,24 @@ router.patch('/:id', async (req, res) => {
   if (typeof req.body.title === 'string' && req.body.title.trim()) patch.title = req.body.title.trim();
 
   // provider and reasoning_effort are validated together, since a provider switch can
-  // invalidate the session's current effort (a custom provider may support different
-  // levels than DeepSeek, or none at all).
-  let provider = config.providers[existing.provider] || config.providers.deepseek;
+  // invalidate the session's current effort (a different provider may support
+  // different levels, or none at all).
+  let provider = getProviderSync(existing.provider) || listProvidersSync()[0] || null;
 
   if (req.body.provider !== undefined) {
-    if (!config.providers[req.body.provider]) {
-      return res.status(400).json({ error: `Unknown provider '${req.body.provider}'.` });
+    const requested = getProviderSync(req.body.provider);
+    if (!requested) {
+      return res.status(400).json({ error: `Unknown provider '${req.body.provider}'. Add it in Settings first.` });
     }
     patch.provider = req.body.provider;
-    provider = config.providers[req.body.provider];
+    provider = requested;
     if (!provider.reasoningEfforts.includes(existing.reasoning_effort)) {
       patch.reasoning_effort = defaultEffortFor(provider);
     }
+  }
+
+  if (!provider) {
+    return res.status(400).json({ error: 'No model providers configured — add one in Settings first.' });
   }
 
   if (req.body.reasoning_effort !== undefined) {
@@ -102,9 +109,11 @@ router.post('/:id/messages', async (req, res) => {
     .single();
   if (projectError || !project) return res.status(404).json({ error: 'Project not found.' });
 
-  const provider = config.providers[session.provider];
+  const provider = getProviderSync(session.provider);
   if (!provider) {
-    return res.status(500).json({ error: `Session is set to unknown provider '${session.provider}'.` });
+    return res.status(500).json({
+      error: `Session is set to unknown provider '${session.provider}'. It may have been removed in Settings — switch this session to a configured provider.`,
+    });
   }
 
   let effort = session.reasoning_effort;
@@ -115,6 +124,16 @@ router.post('/:id/messages', async (req, res) => {
     effort = provider.reasoningEfforts.length ? reasoning_effort : null;
     await supabaseAdmin.from('sessions').update({ reasoning_effort: effort }).eq('id', session.id);
   }
+
+  // Checked before the turn runs (the turn itself saves the user's message as its
+  // first step) — determines whether this session is eligible for auto-naming below.
+  // A count query rather than a full select: we only need to know whether it's zero.
+  const { count: priorMessageCount, error: countError } = await supabaseAdmin
+    .from('messages')
+    .select('id', { count: 'exact', head: true })
+    .eq('session_id', session.id);
+  if (countError) return res.status(500).json({ error: countError.message });
+  const isFirstMessage = (priorMessageCount || 0) === 0;
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -142,6 +161,23 @@ router.post('/:id/messages', async (req, res) => {
       await runInterviewTurn({ project, session, userText: text, provider, effort, sse });
     } else {
       await runTurn({ project, session, userText: text, provider, effort, sse });
+    }
+
+    // Auto-name the session from its first message, the same way most chat products
+    // title a new conversation — only ever on the first turn, and only if nothing
+    // (manual rename, an earlier attempt) already gave it a real title. Runs after
+    // the turn's own 'done'/'handoff' event so it never delays the visible response;
+    // failure here just leaves the session's default title in place.
+    if (isFirstMessage && (!session.title || session.title === 'New session')) {
+      try {
+        const title = await generateSessionTitle({ provider, userText: text, effort });
+        if (title) {
+          await supabaseAdmin.from('sessions').update({ title }).eq('id', session.id);
+          sse.send('session_title', { title });
+        }
+      } catch (err) {
+        console.error(`Title generation failed for session ${session.id}:`, err);
+      }
     }
   } catch (err) {
     console.error(`Turn failed for session ${session.id}:`, err);

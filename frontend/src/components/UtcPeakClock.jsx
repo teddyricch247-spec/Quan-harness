@@ -22,13 +22,18 @@ function formatUtc(date) {
 
 const STORAGE_KEY = 'utcPeakClock.showExplanation';
 
-export default function UtcPeakClock() {
+// `right` renders trailing controls that belong in the same global strip (theme
+// toggle, sign out) — kept as a prop rather than owned here so this component stays
+// only responsible for the clock/peak logic itself.
+export default function UtcPeakClock({ right }) {
   const [now, setNow] = useState(() => new Date());
   const [showExplanation, setShowExplanation] = useState(() => {
     try {
-      return localStorage.getItem(STORAGE_KEY) !== 'hidden';
+      // Hidden by default — the "!" toggle still reveals it on demand, but a personal
+      // tool you check often shouldn't restate the same sentence every time it's peak.
+      return localStorage.getItem(STORAGE_KEY) === 'shown';
     } catch {
-      return true;
+      return false;
     }
   });
 
@@ -56,15 +61,18 @@ export default function UtcPeakClock() {
       <div className="utc-clock-row">
         <span className="utc-clock-time">{formatUtc(now)} UTC</span>
         {peak && <span className="badge utc-clock-badge">Peak</span>}
-        <button
-          type="button"
-          className="ghost utc-clock-toggle"
-          onClick={toggleExplanation}
-          aria-label={showExplanation ? 'Hide peak-time explanation' : 'Show peak-time explanation'}
-          aria-pressed={showExplanation}
-        >
-          !
-        </button>
+        <div className="utc-clock-right">
+          <button
+            type="button"
+            className="ghost utc-clock-toggle"
+            onClick={toggleExplanation}
+            aria-label={showExplanation ? 'Hide peak-time explanation' : 'Show peak-time explanation'}
+            aria-pressed={showExplanation}
+          >
+            !
+          </button>
+          {right}
+        </div>
       </div>
       {peak && showExplanation && (
         <p className="utc-clock-note">Peak time — API rates are expensive right now.</p>

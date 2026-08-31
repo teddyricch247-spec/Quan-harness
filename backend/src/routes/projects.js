@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { supabaseAdmin } from '../supabaseAdmin.js';
-import { config, defaultEffortFor } from '../config.js';
+import { defaultEffortFor } from '../config.js';
+import { getProviderSync, listProvidersSync } from '../services/settingsStore.js';
 
 const router = Router();
 
@@ -44,10 +45,14 @@ router.post('/:id/sessions', async (req, res) => {
   // direct build session, every new session starts as an interview.
   const kind = req.body.kind === 'build' ? 'build' : 'interview';
 
-  const providerId = typeof req.body.provider === 'string' && config.providers[req.body.provider]
+  const available = listProvidersSync();
+  if (available.length === 0) {
+    return res.status(400).json({ error: 'No model providers configured yet — add one in Settings before starting a session.' });
+  }
+  const providerId = typeof req.body.provider === 'string' && getProviderSync(req.body.provider)
     ? req.body.provider
-    : 'deepseek';
-  const provider = config.providers[providerId];
+    : available[0].id;
+  const provider = getProviderSync(providerId);
 
   const { data, error } = await supabaseAdmin
     .from('sessions')

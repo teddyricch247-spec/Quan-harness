@@ -1,11 +1,11 @@
-import { config } from '../config.js';
+import { getTavilyApiKey } from './settingsStore.js';
 
 export async function search(query) {
   const res = await fetch('https://api.tavily.com/search', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      api_key: config.tavilyApiKey,
+      api_key: getTavilyApiKey(),
       query,
       max_results: 5,
     }),

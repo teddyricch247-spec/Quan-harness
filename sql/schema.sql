@@ -1,10 +1,11 @@
 -- Coding Harness — schema
 -- Run this once in the Supabase SQL editor (Project → SQL Editor → New query) for a
--- brand-new project. If you already applied the original version of this file, run
--- sql/002_providers_and_prompt_maker.sql instead (or first) — it takes an existing
--- installation to this same final state without touching your data.
+-- brand-new project. If you already applied an earlier version of this file, run
+-- sql/002_providers_and_prompt_maker.sql and sql/003_settings.sql instead (in that
+-- order) — together they take an existing installation to this same final state
+-- without touching your data.
 --
--- RLS is intentionally left disabled on all three tables: the backend talks to
+-- RLS is intentionally left disabled on every table here: the backend talks to
 -- Postgres with the service-role key (bypasses RLS) and the browser never queries
 -- these tables directly. Only add RLS if you later add direct browser→Supabase reads.
 
@@ -37,9 +38,10 @@ create table if not exists sessions (
   -- interview session that generated it. Null for everything else.
   origin_session_id uuid references sessions(id) on delete set null,
 
-  -- Which entry in backend/src/config.js's `providers` registry this session calls.
-  -- Not a DB-level enum on purpose: providers are configured via env vars, so the set
-  -- of valid ids can change without a migration. Validated at the app layer instead.
+  -- Which row in the `providers` table (below) this session calls. Not a DB-level
+  -- foreign key or enum on purpose: providers are added/edited/removed from the
+  -- Settings page at any time, so the set of valid ids changes without a migration —
+  -- validated at the app layer instead (routes/sessions.js).
   provider text not null default 'deepseek',
 
   -- Reasoning effort for whichever provider this session uses. Nullable and
@@ -74,3 +76,27 @@ create index if not exists sessions_project_id_idx
 
 create index if not exists sessions_origin_session_id_idx
   on sessions (origin_session_id);
+
+-- BYOK settings: model providers and any other API key the harness needs (GitHub,
+-- Vercel, Tavily, ...), managed from the Settings page instead of hardcoded into
+-- backend/.env. Values are encrypted at rest — see
+-- backend/src/services/settingsStore.js and sql/003_settings.sql for the same tables
+-- applied as a migration against an existing project.
+
+create table if not exists providers (
+  id text primary key,                       -- slug stored in sessions.provider, e.g. 'deepseek', 'openai'
+  label text not null,
+  base_url text not null,
+  api_key_encrypted text not null,
+  model text not null,
+  reasoning_efforts text[] not null default '{}',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists secrets (
+  key text primary key,                      -- e.g. 'github_token', 'vercel_token', 'vercel_team_id', 'tavily_api_key'
+  label text not null,
+  value_encrypted text not null,
+  updated_at timestamptz not null default now()
+);

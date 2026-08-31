@@ -63,6 +63,111 @@ feature.
    tools and no structured output that pushes back on whether the work is actually
    good, not just whether it runs. See "A third role: the critic" below.
 
+## A fourth feature, added afterward: Settings (BYOK)
+
+Every model-provider key and every other API key the harness uses (GitHub, Vercel,
+Tavily) used to live in `backend/.env` — hardcoded, and unreachable without a
+redeploy if you wanted to add, change, or rotate one. That's replaced now:
+**Settings** (`/settings` in the frontend, linked from the Projects header) lets you
+add, edit, and delete model providers and API keys at any time, from your phone, with
+no redeploy.
+
+- **Model providers.** Add any endpoint that speaks the OpenAI Responses API shape —
+  DeepSeek, OpenAI, Azure OpenAI's Responses API, a self-hosted gateway — giving it an
+  id (the slug stored on `sessions.provider`), a label, base URL, API key, model, and
+  optionally a comma-separated list of the reasoning-effort levels it accepts. The
+  first provider you add becomes the default for new sessions (`routes/projects.js`);
+  add a second and the provider switch in the composer appears automatically —
+  nothing about the switch itself changed, it still just reads `GET /api/meta`, which
+  now reads from Settings instead of a `config.providers` registry.
+- **Other API keys.** A flat key → value store for anything else the harness needs.
+  It looks for exactly these key names: `github_token` (PAT, `repo` scope),
+  `vercel_token`, `vercel_team_id` (optional, team accounts only), `tavily_api_key`.
+- **Encrypted at rest.** Every value is AES-256-GCM encrypted before it touches
+  Postgres (`backend/src/services/settingsStore.js`), under a key derived from
+  `SETTINGS_ENCRYPTION_KEY` — the one secret still required in the environment.
+  Generate it with `openssl rand -hex 32`. Losing or changing it makes every
+  previously-saved key unreadable; you'd need to re-enter them all in Settings.
+- **Never sent back to the browser.** The Settings page only ever receives a masked
+  preview of a saved key (e.g. `••••ab12`) or a `hasValue` flag — never the real
+  value — so it can show "saved" state without round-tripping the secret itself.
+  Leave the key field blank when editing an existing provider or secret to keep
+  whatever's already saved.
+- **Migrates itself once.** The very first time the backend boots against an empty
+  Settings setup, anything still filled in under the (now-optional) bottom half of
+  `backend/.env` — `DEEPSEEK_API_KEY`, the `CUSTOM_*` vars, `GITHUB_TOKEN`,
+  `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, `TAVILY_API_KEY` — gets imported automatically, so
+  upgrading an existing deployment doesn't lose its current config. After that first
+  boot, those `.env` vars are never read again — manage everything from Settings.
+- **Takes effect immediately.** The backend is a real long-lived process (a Render
+  web service, not serverless), so Settings changes apply without a restart — every
+  write refreshes an in-process cache. Don't edit the `providers` / `secrets` tables
+  directly in the Supabase dashboard; go through the app so the running process
+  actually sees the change.
+
+New tables: `sql/003_settings.sql` (migration for an existing project) — already
+folded into `sql/schema.sql` for anyone setting up fresh. New route:
+`backend/src/routes/settings.js` (`GET/PUT/DELETE /api/settings/providers/:id` and
+`/api/settings/secrets/:key`, behind the same `requireAuth` as everything else). New
+page: `frontend/src/pages/Settings.jsx`.
+
+## A second merge: a UI overhaul from a third, independent thread
+
+While Settings (BYOK) was being built here, another developer was working
+independently on the frontend — dark/light theming, chat bubbles with a copy button,
+a dismissible error banner, and automatic session titling on the backend. You
+uploaded that work as a separate zip and asked for it to be merged in too.
+
+Same approach as the first merge: diffed both trees file-by-file rather than
+guessing. Most of the backend files that showed as "different" there turned out to
+just be that branch's starting point — the pre-Settings shape of `config.js`,
+`index.js`, and the routes — not actual feature work, so those were a
+straightforward "keep the Settings-aware version, it already includes everything
+that branch had except BYOK." Two places genuinely needed hand-merging:
+
+- `backend/src/routes/sessions.js` — kept this thread's BYOK-aware provider lookup
+  (`getProviderSync`/`listProvidersSync` from Settings, with its "no providers
+  configured yet" guardrails) as the base, and folded in the other thread's
+  auto-titling: a one-time `generateSessionTitle` call after a session's first turn,
+  gated on an `isFirstMessage` check, emitting a `session_title` SSE event the
+  frontend applies live.
+- `frontend/src/App.jsx` — the other thread moved global chrome (theme toggle, sign
+  out) into a `right` slot on `UtcPeakClock`, rendered once above every page instead
+  of per-page. Settings now lives there too, next to Sign out, so it's reachable from
+  anywhere instead of only the Projects page.
+
+Everything else in the frontend — the theme system, `MessageBubble`/`CopyButton`/
+`ErrorBanner`, the redesigned composer and thinking block, relative timestamps —
+came in wholesale from that thread, since none of it touched Settings at all.
+`Settings.jsx` itself picked up the new `ErrorBanner` component and the
+`page-header-row` layout convention so it reads as part of the same app rather than
+a page bolted on afterward.
+
+## A fifth feature: UI overhaul + automatic session titles
+
+- **Dark/light theme.** A toggle in the global header; the choice is remembered
+  (`localStorage`) and applied before first paint via a small inline script in
+  `index.html`, so there's no flash of the wrong theme on load. Falls back to the
+  system preference (`prefers-color-scheme`) if nothing's stored yet.
+- **Nicer chat view.** Each message is a proper bubble (`MessageBubble.jsx`,
+  right-aligned for you, left for the agent) with a copy button; errors surface in a
+  dismissible banner instead of a bare line of red text; the composer's textarea now
+  grows with what you type instead of staying a fixed height.
+- **Automatic session titles.** The first time a session gets a real message, a
+  throwaway model call (`backend/src/agent/titleGenerator.js` — no tools, nothing
+  streamed to the UI) names it from that message, the same way most chat apps
+  auto-title a new conversation. Runs once, only if the session still has its
+  default title, and never blocks or delays the visible response — if it fails, the
+  session just keeps its default title. You can still rename manually any time by
+  tapping the title.
+- **Relative timestamps** ("3h ago" instead of a full date/time) in the session
+  list, and list rows across Projects/Sessions are now full-width tap targets
+  instead of a link plus a trailing caption.
+
+New files: `frontend/src/components/{CopyButton,ErrorBanner,MessageBubble,
+ThemeToggle}.jsx`, `backend/src/agent/titleGenerator.js`. No schema changes needed —
+`title` already existed on `sessions` from the original build.
+
 ## What's already done for you
 
 The Supabase side is fully provisioned — I have your Supabase connector, so I used it
@@ -82,6 +187,12 @@ directly instead of making you click through the dashboard:
   the repo in case you ever need it against a second environment. The critic feature
   needed no schema changes at all (`critique_notes` just lives inside the existing
   `turn_summary` JSON blob).
+- **Migration 003 applied**: `providers` and `secrets` tables exist for the Settings
+  (BYOK) feature — see above. Also ran directly via the Supabase connector;
+  `sql/003_settings.sql` is that same migration, kept in the repo for a second
+  environment. Both tables start empty — the backend fills `providers` on its first
+  boot after you set `SETTINGS_ENCRYPTION_KEY`, either from Settings or, once, from
+  any legacy `.env` values still sitting in Render.
 
 **Two things I could not do for you**, both by design — the Supabase connector
 doesn't expose either of these to automated tools:
@@ -97,7 +208,7 @@ doesn't expose either of these to automated tools:
    add yourself manually (email + password). This is the only login the app will ever
    have — there's no signup screen in the frontend.
 
-**One thing worth knowing:** RLS is disabled on all three tables, on purpose — the
+**One thing worth knowing:** RLS is disabled on every table, on purpose — the
 backend uses the service-role key (which bypasses RLS) and the browser never talks to
 Postgres directly, so table-level policies wouldn't add anything here. Supabase's own
 advisor will flag this as "critical" every time you check it; that's expected. If you
@@ -106,25 +217,20 @@ real policies before you do.
 
 ## What you still need to fill in
 
-`backend/.env` has four more required blanks — paste in real values before running:
+`backend/.env` now has one required blank instead of four:
 
-- `DEEPSEEK_API_KEY` — from your DeepSeek account
-- `GITHUB_TOKEN` — a Personal Access Token with the **repo** scope
-- `VERCEL_TOKEN` — an account or team token
-- `TAVILY_API_KEY` — from your Tavily account
+- `SETTINGS_ENCRYPTION_KEY` — generate with `openssl rand -hex 32`. This encrypts
+  every provider/API key you save on the Settings page; it's the one secret that
+  still has to live in the environment.
 
-Optional — only if you want a second provider you can switch to instead of DeepSeek:
-
-- `CUSTOM_LABEL`, `CUSTOM_BASE_URL`, `CUSTOM_API_KEY`, `CUSTOM_MODEL` — point these at
-  any endpoint that implements the OpenAI Responses API (`POST {base_url}/responses`,
-  streaming, `instructions`/`input`/`tools` request shape). OpenAI's own API works
-  here directly.
-- `CUSTOM_REASONING_EFFORTS` — comma-separated levels your model's Responses API
-  actually accepts for `reasoning.effort` (e.g. `low,medium,high`), or leave blank if
-  the model doesn't take that param at all.
-
-Leave the `CUSTOM_*` block blank and the app behaves exactly as it did before — no
-provider switch shown, DeepSeek is the only option.
+Everything that used to be a required `.env` blank — `DEEPSEEK_API_KEY`,
+`GITHUB_TOKEN`, `VERCEL_TOKEN`, `TAVILY_API_KEY`, and the optional `CUSTOM_*`
+second-provider vars — now lives in **Settings** (`/settings` in the app) instead,
+encrypted in Postgres, editable any time with no redeploy. See "Settings (BYOK)"
+above. `.env.example` still lists them under an "optional, one-time import" section:
+fill any of those in and the very first boot copies them into Settings automatically
+so an existing deployment doesn't lose its config, but for a fresh setup you can
+ignore that whole section and just use the Settings page after you deploy.
 
 ## Running it locally
 
@@ -268,14 +374,19 @@ edit, not gospel.
 ```
 /harness
   /frontend   → Vite + React → deploy to Vercel yourself (root directory: /frontend)
+                  pages/Settings.jsx → BYOK model-provider/API-key management
+                  components/{CopyButton,ErrorBanner,MessageBubble,ThemeToggle}.jsx
+                    → from the UI-overhaul merge, see above
   /backend    → Node + Express → deploy to Render yourself (root directory: /backend)
+                  agent/titleGenerator.js → one-shot auto-titling, see above
   /shared     → prompts + tool schemas for all agent roles, read by the backend at boot:
                   main-agent-*        → the coding agent (build sessions)
                   interview-agent-*   → the prompt-maker agent (interview sessions)
                   verifier-*          → the post-finish_task correctness check
                   critic-*            → the optional mid-task self-critique
   /sql        → schema.sql (fresh-install shape) +
-                002_providers_and_prompt_maker.sql (already applied to the live project)
+                002_providers_and_prompt_maker.sql +
+                003_settings.sql (both already applied to the live project)
 ```
 
 ## Deploying later (optional, when you're ready)
@@ -285,9 +396,11 @@ This wasn't done for you, per your request — but when you are ready:
 - **Backend → Render**: new Web Service, root directory `backend`, build `npm
   install`, start `npm start`. It must be a real long-lived process (not serverless)
   so it can hold an SSE connection open for an entire multi-tool-call turn — Render's
-  standard web service is exactly that. Set every var in `backend/.env` as a Render
-  environment variable (the `CUSTOM_*` ones only if you're actually using a second
-  provider), plus `FRONTEND_ORIGIN` pointed at your real Vercel URL once you have it.
+  standard web service is exactly that. As Render environment variables, you now only
+  need `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`,
+  `SETTINGS_ENCRYPTION_KEY`, and `FRONTEND_ORIGIN` pointed at your real Vercel URL —
+  model providers and every other API key are added afterward from the Settings page
+  in the running app, not set here.
 - **Frontend → Vercel**: new project, root directory `frontend`, framework preset
   Vite. Set the three `frontend/.env` vars as Vercel environment variables, with
   `VITE_BACKEND_URL` pointed at your real Render URL.

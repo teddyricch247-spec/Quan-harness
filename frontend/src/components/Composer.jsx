@@ -1,6 +1,8 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import ReasoningSwitch from './ReasoningSwitch.jsx';
 import ProviderSwitch from './ProviderSwitch.jsx';
+
+const MAX_ROWS = 8;
 
 export default function Composer({
   effort,
@@ -14,6 +16,20 @@ export default function Composer({
   placeholder,
 }) {
   const [text, setText] = useState('');
+  const textareaRef = useRef(null);
+
+  // Grows the textarea with its content, up to MAX_ROWS, then scrolls — avoids both
+  // a cramped fixed-height box for long messages and an unbounded one that pushes
+  // the send button off-screen.
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    const lineHeight = parseFloat(getComputedStyle(el).lineHeight) || 20;
+    const maxHeight = lineHeight * MAX_ROWS;
+    el.style.height = `${Math.min(el.scrollHeight, maxHeight)}px`;
+    el.style.overflowY = el.scrollHeight > maxHeight ? 'auto' : 'hidden';
+  }, [text]);
 
   function handleSubmit(e) {
     e.preventDefault();
@@ -24,7 +40,9 @@ export default function Composer({
   }
 
   function handleKeyDown(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    // isComposing is true while an IME (e.g. typing Japanese/Chinese/Korean) is
+    // resolving a candidate — Enter there confirms the candidate, it isn't "send".
+    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       handleSubmit(e);
     }
@@ -38,12 +56,13 @@ export default function Composer({
       </div>
       <div className="composer-row">
         <textarea
+          ref={textareaRef}
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={handleKeyDown}
           placeholder={busy ? 'Working…' : placeholder || 'Describe what to change…'}
           disabled={busy}
-          rows={2}
+          rows={1}
         />
         <button type="submit" disabled={busy || !text.trim()}>
           {busy ? '…' : 'Send'}

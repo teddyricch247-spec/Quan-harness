@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../lib/api.js';
+import ErrorBanner from '../components/ErrorBanner.jsx';
 
 const MODE_KEY = 'harness.newSessionMode';
 
@@ -12,6 +13,18 @@ function loadDefaultMode() {
   } catch {
     return 'interview';
   }
+}
+
+function formatRelativeTime(iso) {
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const diffMin = Math.round(diffMs / 60000);
+  if (diffMin < 1) return 'just now';
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.round(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ago`;
+  const diffDay = Math.round(diffHr / 24);
+  if (diffDay < 7) return `${diffDay}d ago`;
+  return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
 export default function SessionList() {
@@ -62,10 +75,12 @@ export default function SessionList() {
         <Link to="/" className="back-link">
           ← Projects
         </Link>
-        <h1>{project?.name || '…'}</h1>
+        <div className="page-header-row">
+          <h1>{project?.name || '…'}</h1>
+        </div>
       </header>
 
-      {error && <p className="error">{error}</p>}
+      <ErrorBanner message={error} onDismiss={() => setError(null)} />
 
       {sessions === null ? (
         <p className="muted">Loading…</p>
@@ -75,11 +90,13 @@ export default function SessionList() {
         <ul className="list">
           {sessions.map((s) => (
             <li key={s.id}>
-              <span>
-                <Link to={`/project/${projectId}/session/${s.id}`}>{s.title}</Link>
-                {s.kind === 'interview' && <span className="badge small">Prompt Maker</span>}
-              </span>
-              <span className="muted"> {new Date(s.updated_at).toLocaleString()}</span>
+              <Link to={`/project/${projectId}/session/${s.id}`} className="list-row">
+                <span>
+                  {s.title}
+                  {s.kind === 'interview' && <span className="badge small">Prompt Maker</span>}
+                </span>
+                <span className="muted small">{formatRelativeTime(s.updated_at)}</span>
+              </Link>
             </li>
           ))}
         </ul>

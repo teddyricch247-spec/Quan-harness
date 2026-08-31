@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../lib/api.js';
-import { supabase } from '../supabaseClient.js';
+import ErrorBanner from '../components/ErrorBanner.jsx';
 
 export default function ProjectList() {
   const [projects, setProjects] = useState(null);
@@ -41,13 +41,12 @@ export default function ProjectList() {
   return (
     <main className="page">
       <header className="page-header">
-        <h1>Projects</h1>
-        <button className="ghost" onClick={() => supabase.auth.signOut()}>
-          Sign out
-        </button>
+        <div className="page-header-row">
+          <h1>Projects</h1>
+        </div>
       </header>
 
-      {error && <p className="error">{error}</p>}
+      <ErrorBanner message={error} onDismiss={() => setError(null)} />
 
       {projects === null ? (
         <p className="muted">Loading…</p>
@@ -57,8 +56,10 @@ export default function ProjectList() {
         <ul className="list">
           {projects.map((p) => (
             <li key={p.id}>
-              <Link to={`/project/${p.id}`}>{p.name}</Link>
-              <span className="muted"> {p.github_repo || '(no repo yet)'}</span>
+              <Link to={`/project/${p.id}`} className="list-row">
+                <span>{p.name}</span>
+                <span className="muted small">{p.github_repo || '(no repo yet)'}</span>
+              </Link>
             </li>
           ))}
         </ul>
