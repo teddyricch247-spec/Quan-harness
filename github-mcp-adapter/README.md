@@ -83,15 +83,18 @@ Every description below is copied straight from its docstring in
 | `close_issue(repo, number)` | Close an issue (reversible — reopening restores it). |
 | **Repositories** ||
 | `create_repository(name, description="", private=True)` | Create a new repo. Needs broader token permissions than everything else here — see its docstring. |
+| `delete_repository(repo, confirm)` | **Irreversible.** Permanently delete a repo, cascading issues/PRs/wiki/releases. `confirm` must exactly equal `repo`. |
 | **Vercel** ||
 | `vercel_list_env_vars(project, target="")` | List a project's env vars — key/target/type/updated_at only, never values. |
 | `vercel_set_env_var(project, key, value, target=None, sensitive=True)` | Create-or-update an env var in one call. Doesn't redeploy — see its docstring. |
 | `vercel_remove_env_var(project, key, target="")` | Delete an env var. Omitting `target` removes it from every environment. |
 | `vercel_redeploy(project, branch="", target="production")` | Trigger a fresh deployment from the linked GitHub repo's latest commit. |
+| `vercel_delete_project(project, confirm)` | **Irreversible.** Permanently delete a project and all its deployments/domains/env vars. `confirm` must exactly equal `project`. |
 | **Supabase** ||
 | `supabase_list_secrets(project_ref)` | List an Edge Function's secret names only, never values. |
 | `supabase_set_secrets(project_ref, secrets)` | Create or update one or more secrets in a single call. |
 | `supabase_delete_secrets(project_ref, names)` | Delete one or more secrets by name (Supabase's own bulk-delete endpoint — currently marked experimental on their side). |
+| `supabase_delete_project(project_ref, confirm)` | **Irreversible.** Permanently delete a project — database, storage, Auth users, everything. `confirm` must exactly equal `project_ref`. |
 
 ## Design notes — what's gated, what isn't, and what's excluded
 
@@ -107,31 +110,76 @@ main branch's history with no way back. Every other branch, and every other
 operation — including merging to main and deleting files — has zero
 restriction.
 
-**Deliberately not included (GitHub):** deleting a repository (cascades, no
-undo, not a routine action) — and GitHub Actions/workflows, releases/tags,
-and collaborator/permission management (different API surface than "read
-and write my code").
+**Hard-delete tools (GitHub, Vercel, Supabase):** `delete_repository`,
+`vercel_delete_project`, and `supabase_delete_project` all cascade and are
+irreversible on the platform's own side — no undo, no trash/recovery
+window. Each requires a `confirm` argument that must exactly equal the
+identifier being deleted (repo full name, project ID/name, or project
+ref) — a different gate than `delete_branch`'s default-branch refusal,
+since there's no safe fallback target to refuse down to here; the point is
+that a single ambiguous or injected instruction (something hidden in a
+file, issue, or PR body this agent read earlier) can't trigger a real
+deletion without already, verbatim, knowing exactly what it's destroying.
+There's still no multi-step "are you sure" — the call executes the moment
+`confirm` matches, so treat getting `confirm` right as the actual point of
+decision, not a formality on the way to it.
 
-**Deliberately not included (Vercel):** deleting a project, and buying or
-attaching domains. Both already go through the official Vercel connector,
-which gates domain purchases behind its own cost-confirmation step
-(`get_purchase_quote` / `confirm_cost`) — no reason to build a second path
-around that here.
+`delete_repository` needs a GitHub token with the `delete_repo` scope
+(classic PAT) or `Administration: write` (fine-grained PAT) — broader than
+every other GitHub tool here except `create_repository`. If your token
+doesn't have it, the call fails with a 403 rather than deleting anything;
+see "What to update on your side" below.
 
-**Deliberately not included (Supabase):** retrieving the service_role/secret
-key, and deleting a project. The key is the one thing I'd actually call a
-hard line rather than a judgment call — it's not scoped to one session or
-one action the way everything else here is. Once it's in a transcript it's a
-standing credential that bypasses Row Level Security entirely and works
-until you rotate it, independent of whatever this adapter does afterward.
-Everything else new here (env vars, secrets, redeploys) is cheap to reverse
-if it goes wrong — that one isn't, so it stays out rather than gated.
+**Deliberately still not included (GitHub):** GitHub Actions/workflows,
+releases/tags, and collaborator/permission management (different API
+surface than "read and write my code").
 
-Nothing new here got a `delete_branch`-style hard guard, deliberately: env
-var writes, secret writes, and redeploys are all recoverable the same way
+**Deliberately still not included (Vercel):** buying or attaching domains —
+already goes through the official Vercel connector, which gates domain
+purchases behind its own cost-confirmation step (`get_purchase_quote` /
+`confirm_cost`) — no reason to build a second path around that here.
+
+**Deliberately still not included (Supabase):** retrieving the
+service_role/secret key. This one stays a hard line rather than a judgment
+call, unlike project deletion above — it's not a scoped, one-time action
+the way a delete is. Once it's in a transcript it's a standing credential
+that bypasses Row Level Security entirely and works until you rotate it,
+independent of whatever this adapter does afterward.
+
+Nothing else here got a `delete_branch`-style hard guard: env var writes,
+secret writes, and redeploys are all recoverable the same way
 `merge_pull_request` and `delete_file` already are — reset the value, deploy
 again — so they follow the "execute fully, no gate" tier those already sit
-in, not the default-branch tier.
+in, not the confirm-gated tier the three deletes above sit in.
+
+## What to update on your side
+
+These three tools need more than a code change to actually work — do this
+before relying on them:
+
+1. **GitHub token scope.** `delete_repository` needs `delete_repo`
+   (classic PAT) or `Administration: write` (fine-grained PAT) on top of
+   whatever `GITHUB_TOKEN` already grants. Check your token's scopes at
+   https://github.com/settings/tokens (classic) or
+   https://github.com/settings/personal-access-tokens (fine-grained), add
+   the permission if it's missing, and update `GITHUB_TOKEN` in Render's
+   environment variables if the token value itself changed.
+2. **Vercel token permission.** `VERCEL_TOKEN` needs project-deletion
+   rights on whatever scope it's issued under (account or team). Personal
+   tokens with full account access already have this; team tokens may need
+   an Owner/Admin role — check at
+   https://vercel.com/account/tokens.
+3. **Supabase access token.** `SUPABASE_ACCESS_TOKEN` needs permission to
+   manage (not just read) the target project. Check at
+   https://supabase.com/dashboard/account/tokens.
+4. **Redeploy this service.** Push this change to the GitHub repo this
+   adapter deploys from, then let Render redeploy it (or trigger a manual
+   deploy from the Render dashboard) — editing `server.py` locally does
+   nothing until the running service picks it up.
+5. **No Claude.ai reconnection needed.** The tool list refreshes
+   automatically the next time Claude calls this MCP server; you don't
+   need to redo the OAuth approval for new tools on an already-connected
+   server.
 
 ## How `harness` is and isn't shared with this repo's own backend
 

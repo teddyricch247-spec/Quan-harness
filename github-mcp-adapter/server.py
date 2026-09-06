@@ -740,12 +740,43 @@ def create_repository(name: str, description: str = "", private: bool = True) ->
     return {"full_name": r.full_name, "html_url": r.html_url}
 
 
-# Deliberately excluded: deleting a repository. Unlike everything
-# above, that's not a "basic developer tool" a coding agent needs day
-# to day, it cascades (issues, PRs, wiki, releases, stars, and fork
-# links all go with it), and GitHub gives no undo. If you ever want a
-# repo gone, do that one by hand in GitHub's UI.
-#
+@mcp.tool
+def delete_repository(repo: str, confirm: str) -> dict:
+    """Permanently delete a GitHub repository. IRREVERSIBLE.
+
+    Cascades: issues, PRs, wiki, releases, stars, and fork links are
+    all deleted with it. GitHub gives no undo and no trash/recovery
+    window for this API call.
+
+    Requires a GitHub token with the "delete_repo" scope (classic PAT)
+    or "Administration: write" (fine-grained PAT) — broader than every
+    other tool in this file. If the token lacks it, this fails with a
+    403 rather than deleting anything.
+
+    Args:
+        repo: Repository identifier in "owner/name" format.
+        confirm: Must exactly equal `repo`. A mismatch raises instead
+            of deleting anything. This exists so a single ambiguous
+            or injected instruction (e.g. something hidden in a file,
+            issue, or PR body this agent read earlier) can't trigger
+            a real deletion without already knowing precisely, in
+            full, what it's asking to destroy.
+
+    Returns:
+        A dict with "deleted": true and "full_name".
+    """
+    if confirm != repo:
+        raise ValueError(
+            f"confirm ('{confirm}') does not match repo ('{repo}'). "
+            f"Pass confirm={repo!r} exactly to proceed — this call does "
+            f"nothing until it matches."
+        )
+    r = gh.get_repo(repo)
+    full_name = r.full_name
+    r.delete()
+    return {"deleted": True, "full_name": full_name}
+
+
 # Also excluded, as a different API surface than "work with my code":
 # GitHub Actions/workflows, releases/tags, and collaborator/permission
 # management. Say the word if any of those would actually help.
@@ -922,11 +953,39 @@ def vercel_redeploy(project: str, branch: str = "", target: str = "production") 
     return {"id": data.get("id"), "url": data.get("url"), "ready_state": data.get("readyState")}
 
 
-# Deliberately not included: deleting a project, and buying or
-# attaching domains. Both already go through Vercel's own official
-# connector, which gates domain purchases behind an explicit
-# cost-confirmation step (get_purchase_quote / confirm_cost) — no
-# reason to build a second path around that here.
+@mcp.tool
+def vercel_delete_project(project: str, confirm: str) -> dict:
+    """Permanently delete a Vercel project. IRREVERSIBLE.
+
+    Deletes every deployment, domain assignment, and env var that
+    belongs to this project. Vercel gives no undo for this call.
+
+    Args:
+        project: Vercel project ID or name.
+        confirm: Must exactly equal `project`. A mismatch raises
+            instead of deleting anything — same reasoning as
+            delete_repository's confirm argument: a single ambiguous
+            or injected instruction can't trigger a real deletion
+            without already knowing precisely what it's destroying.
+
+    Returns:
+        A dict with "deleted": true and "project".
+    """
+    if confirm != project:
+        raise ValueError(
+            f"confirm ('{confirm}') does not match project ('{project}'). "
+            f"Pass confirm={project!r} exactly to proceed — this call does "
+            f"nothing until it matches."
+        )
+    _vercel_request("DELETE", f"/v9/projects/{project}")
+    return {"deleted": True, "project": project}
+
+
+# Deliberately not included: buying or attaching domains. That already
+# goes through Vercel's own official connector, which gates domain
+# purchases behind an explicit cost-confirmation step
+# (get_purchase_quote / confirm_cost) — no reason to build a second
+# path around that here.
 
 
 # =====================================================================
@@ -1005,11 +1064,41 @@ def supabase_delete_secrets(project_ref: str, names: list[str]) -> dict:
     return {"deleted": names}
 
 
-# Deliberately not included: retrieving the service_role/secret key
-# (never exposed via the official connector either, and for good
-# reason — see the section note above) and deleting a project
-# (irreversible, cascades, not a routine action — same reasoning as
-# excluding repo deletion above).
+@mcp.tool
+def supabase_delete_project(project_ref: str, confirm: str) -> dict:
+    """Permanently delete a Supabase project. IRREVERSIBLE.
+
+    Deletes the project's database, all data in it, Edge Functions,
+    storage buckets, and Auth users. Supabase gives no undo for this
+    call — there's no backup restore after deletion.
+
+    Requires a SUPABASE_ACCESS_TOKEN (personal access token) with
+    permission to manage this project.
+
+    Args:
+        project_ref: Supabase project reference ID (e.g. "abcdefghij").
+        confirm: Must exactly equal `project_ref`. A mismatch raises
+            instead of deleting anything — same reasoning as
+            delete_repository's confirm argument.
+
+    Returns:
+        A dict with "deleted": true and "project_ref".
+    """
+    if confirm != project_ref:
+        raise ValueError(
+            f"confirm ('{confirm}') does not match project_ref "
+            f"('{project_ref}'). Pass confirm={project_ref!r} exactly to "
+            f"proceed — this call does nothing until it matches."
+        )
+    _supabase_mgmt_request("DELETE", f"/v1/projects/{project_ref}")
+    return {"deleted": True, "project_ref": project_ref}
+
+
+# Deliberately still not included: retrieving the service_role/secret
+# key (never exposed via the official connector either, and for good
+# reason — see the section note above). That one stays a hard line
+# regardless — it's a standing credential, not a scoped action like
+# the deletes above.
 
 
 # ---- Auth pages (public, unauthenticated routes) -------------------------
