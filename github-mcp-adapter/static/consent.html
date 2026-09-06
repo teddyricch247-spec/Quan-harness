@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Authorize — Quan Adaptor</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #0d1117; color: #e6edf3;
+    display: flex; align-items: center; justify-content: center;
+    min-height: 100vh; margin: 0; padding: 1rem;
+  }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 2rem; width: 100%; max-width: 360px; }
+  .logo { display: block; width: 40px; height: 40px; border-radius: 8px; margin: 0 0 0.75rem; }
+  h1 { font-size: 1.1rem; margin: 0 0 0.5rem; }
+  p { color: #8b949e; font-size: 0.9rem; line-height: 1.4; }
+  .row { display: flex; justify-content: space-between; font-size: 0.85rem; margin: 0.5rem 0; gap: 1rem; }
+  .row span:first-child { color: #8b949e; white-space: nowrap; }
+  .row span:last-child { text-align: right; word-break: break-all; }
+  ul { margin: 0.25rem 0 0; padding-left: 1.1rem; font-size: 0.85rem; }
+  .btns { display: flex; gap: 0.6rem; margin-top: 1.5rem; }
+  button { flex: 1; padding: 0.6rem; border: none; border-radius: 6px; font-weight: 600; font-size: 0.9rem; cursor: pointer; }
+  #approve { background: #238636; color: white; }
+  #deny { background: #21262d; color: #e6edf3; border: 1px solid #30363d; }
+  .err { color: #f85149; font-size: 0.85rem; }
+</style>
+</head>
+<body>
+  <div class="card" id="card">
+    <p>Loading…</p>
+  </div>
+
+  <script type="module">
+    import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+
+    function escapeHtml(str) {
+      return String(str).replace(/[&<>"']/g, (c) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+      }[c]));
+    }
+
+    const card = document.getElementById("card");
+    const params = new URLSearchParams(window.location.search);
+    const authorizationId = params.get("authorization_id");
+    const here = window.location.pathname + window.location.search;
+
+    if (!authorizationId) {
+      card.innerHTML = '<p class="err">Missing authorization_id — this page should only be reached via an OAuth redirect from Supabase.</p>';
+      throw new Error("no authorization_id");
+    }
+
+    const cfg = await fetch("/auth-config").then((r) => r.json());
+    const supabase = createClient(cfg.supabaseUrl, cfg.supabaseAnonKey);
+
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) {
+      window.location.href = "/login?redirect=" + encodeURIComponent(here);
+      throw new Error("redirecting to login");
+    }
+
+    const { data: details, error: detailsErr } = await supabase.auth.oauth.getAuthorizationDetails(authorizationId);
+
+    if (detailsErr || !details) {
+      card.innerHTML = '<p class="err">' + escapeHtml(detailsErr?.message || "Invalid or expired authorization request.") + "</p>";
+      throw new Error("details error");
+    }
+
+    // A request that was already approved comes back without an
+    // authorization_id — just follow the redirect it gives us.
+    if (!("authorization_id" in details)) {
+      window.location.href = details.redirect_url;
+      throw new Error("already approved, redirecting");
+    }
+
+    const scopes = (details.scope || "").trim();
+    card.innerHTML = `
+      <img class="logo" alt="Quan Adaptor" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAACAUlEQVR42u2bQW7jMAxFPwtpdoFr+Ca5Qc4xh819ikix4KUdcxaNXHdmU1OGNUA+Ae0im3qiKX0SgRpsnmdVVY0xatu2CkBFRAEcMvK72rbVGOM3n7baG17cCIAACIAACIAACIAACIAAXtScqm6elOeoKkRkGUdZfpeIQFWXYQJgcTzP8d5jHMciByyW3zWOI7z3RRvg7ve7yQERQUoJXdfBObfsxlERoKpomgYhBEzTtPi0+VlPPW924Hq9omkaswPWCMgbcLlckFIyb4ApArJN04Su63A6neokMOcQQsAwDPZnWHOAqv6TA46OgL9zgCkCrN/tetHrrHzkSbA+BdbJkfcAAiAAAiAAAiAAAiCAn9wEaztQux5RHUDteoSrvfsppc3O71mPcLUWnhdwPp/R9/2mBexZj6geAbfbzazn96hHVM8BFj2/Zz3ivzgFLHp+r3oEL0IEQAAEQAAEQAAE8Lr1gBI5au3Pl+r5bzc/1a9hAVBSkLD250v1/Pr98A4oKYi0bWuKgJL+fKmez799bxrMocdjsoshiTGqJQJK+vPFel4VEMGcBtwuv/FId4h402dgioBlcmF/vljPu1/4CD2mIUDg8fl/ioNyQEl/vljPPyPg8cwBIt4eAdbkUdqfL9bzed5yAthOAl6ECIAACIAACIAACIAACIAAXtP+AIJIO8lYmc/TAAAAAElFTkSuQmCC" />
+      <h1>Authorize ${escapeHtml(details.client?.name || "this app")}</h1>
+      <p>This will let it act on your GitHub repos, Vercel projects, and Supabase Edge Function secrets through this server, as you.</p>
+      <div class="row"><span>Redirect URI</span><span>${escapeHtml(details.redirect_uri || "")}</span></div>
+      ${scopes ? `<div class="row"><span>Scopes</span><span>${escapeHtml(scopes)}</span></div>` : ""}
+      <div class="btns">
+        <button id="deny">Deny</button>
+        <button id="approve">Approve</button>
+      </div>
+    `;
+
+    document.getElementById("approve").addEventListener("click", async () => {
+      const { data, error } = await supabase.auth.oauth.approveAuthorization(authorizationId);
+      if (error) { card.innerHTML = '<p class="err">' + escapeHtml(error.message) + "</p>"; return; }
+      window.location.href = data.redirect_url;
+    });
+
+    document.getElementById("deny").addEventListener("click", async () => {
+      const { data, error } = await supabase.auth.oauth.denyAuthorization(authorizationId);
+      if (error) { card.innerHTML = '<p class="err">' + escapeHtml(error.message) + "</p>"; return; }
+      window.location.href = data.redirect_url;
+    });
+  </script>
+</body>
+</html>
