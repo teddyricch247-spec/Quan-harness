@@ -1,0 +1,22 @@
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+pydantic==2.10.3
+pydantic-settings==2.7.0
+supabase==2.10.0
+httpx==0.28.1
+PyJWT[crypto]==2.10.1
+python-dotenv==1.0.1
+python-multipart==0.0.20
+litellm==1.55.4  # Phase 3 (§7, §16.2): the LLM wrapper agent_loop.py's call_llm
+  # goes through — one interface across Anthropic/OpenAI/Google/OpenRouter/a
+  # custom endpoint. Version pinned to what was current when this was written;
+  # not verified against a real installed copy in this environment (no
+  # network — see /docs/PHASE3_NOTES.md), so confirm it still resolves before
+  # deploying.
+
+# Optional (Phase 2, §22's tree-sitter parse-error check) — not installed by
+# default; see /docs/PHASE2_NOTES.md's rough-edges section for why. Uncomment
+# to enable the language-agnostic syntax-check pass ahead of the built-in
+# Python/JS-heuristic fallbacks in app/services/text_edit.py:
+# tree-sitter==0.23.2
+# tree-sitter-languages==1.10.2

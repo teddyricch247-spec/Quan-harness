@@ -1,5 +1,24 @@
-node_modules/
-dist/
+# Environment files — never commit real secrets
 .env
+.env.local
+*.env
+!*.env.example
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+next-env.d.ts
+npm-debug.log*
+
+# OS
 .DS_Store
-*.log
+Thumbs.db
