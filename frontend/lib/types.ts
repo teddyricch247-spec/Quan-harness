@@ -117,3 +117,23 @@ export interface AuditLogEntry {
   session_id: string | null;
   created_at: string;
 }
+
+export interface ProjectMemory {
+  project_id: string;
+  memory_md: string;
+}
+
+export interface BuildUserMemory {
+  memory_md: string;
+}
+
+export interface ProjectKnowledgeNote {
+  id: string;
+  project_id: string;
+  name: string;
+  body: string;
+  trigger_type: "keyword" | "path";
+  trigger_value: string;
+  created_at: string;
+  updated_at: string;
+}

@@ -7,7 +7,8 @@ Postgres database. Two ways to do it — pick whichever you're comfortable with:
 1. Open your project in the Supabase dashboard → SQL Editor.
 2. Paste the contents of `0001_extensions.sql`, run it.
 3. Repeat for `0002_connections.sql`, `0003_vault_helpers.sql`, `0004_projects.sql`,
-   `0005_sessions.sql`, `0006_workspace_tools.sql`, in that order.
+   `0005_sessions.sql`, `0006_workspace_tools.sql`, `0007_memory_and_project_knowledge.sql`,
+   in that order.
 
 **Option B — Supabase CLI**
 ```bash
@@ -28,12 +29,17 @@ string → URI, in your Supabase dashboard.)
   reference.
 - `0006` (Phase 2) adds `project_secrets` (references `projects`), plus columns
   on `projects` and `sessions` — needs both tables to already exist.
+- `0007` (Phase 4.1/4.2) adds `project_memory`, `project_memory_log`,
+  `build_user_memory`, and `project_knowledge` (all reference `projects` and/or
+  `sessions`, so both need to already exist), plus a CHECK-constraint change on
+  `session_events.event_type` — needs `0005` to already exist.
 
 ## Verifying it worked
-After running all six, `select table_name from information_schema.tables where
+After running all seven, `select table_name from information_schema.tables where
 table_schema = 'public' order by 1;` should list: `approval_requests`,
-`checkpoints`, `github_credentials`, `llm_credentials`, `mcp_servers`,
-`mcp_tool_overrides`, `project_mcp_access`, `project_secrets`, `project_workspaces`,
+`build_user_memory`, `checkpoints`, `github_credentials`, `llm_credentials`,
+`mcp_servers`, `mcp_tool_overrides`, `project_knowledge`, `project_mcp_access`,
+`project_memory`, `project_memory_log`, `project_secrets`, `project_workspaces`,
 `projects`, `session_events`, `sessions`, `audit_log`.
 
 See `/docs/YOUR_SETUP_CHECKLIST.md` for the rest of the Supabase setup (Vault,

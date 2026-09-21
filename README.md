@@ -1,8 +1,9 @@
-# Quan Harness — Phases 1-3
+# Quan Harness — Phases 1-3 + 4.1/4.2
 
 A hosted, multi-tenant web application that lets a signed-up person delegate
 coding tasks to an AI agent with real access to their own codebase. This repo
-now covers **Phases 1–3 of 9** from the full roadmap:
+now covers **Phases 1–3 of 9, plus Phase 4's Memory System and Project
+Knowledge sub-prompts (4.1/4.2)**, from the full roadmap:
 
 - **Phase 1 — Foundations:** auth, connections, projects/sessions data model,
   platform operations. See `docs/PHASE1_NOTES.md`.
@@ -14,12 +15,21 @@ now covers **Phases 1–3 of 9** from the full roadmap:
   the Ask-gate approval flow, and the agent-facing HTTP surface
   (`/messages`, `/interrupt`, `/stream`, `/approvals`). See
   `docs/PHASE3_NOTES.md`.
+- **Phase 4.1/4.2 — Memory & Project Knowledge:** the two-tier Memory System
+  (`project_memory`/`build_user_memory`, auto-extracted after every
+  completed or stuck turn) and Project Knowledge (short, human-authored,
+  keyword/path-triggered notes), both now wired into the system prompt's
+  `WHAT_YOU_KNOW_ABOUT_*`/`PROJECT_KNOWLEDGE` sections. See
+  `docs/PHASE4_1_4_2_NOTES.md`.
 
-There's now a real, running agent: send a message to a session and it plans,
-edits files, runs commands, and asks for approval on anything flagged, the
-same loop end to end. What's still missing — memory/Project Knowledge, the
-deploy pipeline, Live Preview, sub-agent delegation, visual QA, and beyond —
-is exactly what `docs/PHASE3_NOTES.md`'s closing section hands to Phase 4.
+There's now a real, running agent that also remembers: send a message to a
+session and it plans, edits files, runs commands, asks for approval on
+anything flagged, and — once the turn ends — quietly updates what it knows
+about this project and about you, the same loop end to end. What's still
+missing — connector integration polish (4.3), auto-provisioning (4.4),
+scheduling (4.5), the deploy pipeline, Live Preview, sub-agent delegation,
+visual QA, and beyond — is exactly what `docs/PHASE4_1_4_2_NOTES.md`'s
+closing section hands off next.
 
 ## What's in here
 
@@ -90,7 +100,10 @@ pure-module suite is 264 tests; all 264 pass under a manual assert-based runner,
 **but `pytest` itself has never been run against this codebase in any environment
 it was built in** (none had `pytest` or network access) — run it for real first,
 and treat any failure there as more trustworthy than the numbers above. See
-`docs/PHASE3_NOTES.md`.
+`docs/PHASE3_NOTES.md`. Phase 4.1/4.2 added 50 more pure-module tests
+(`test_memory.py`, `test_project_knowledge.py`, plus additions to
+`test_system_prompt.py`), all 50 passing under the same manual runner — see
+`docs/PHASE4_1_4_2_NOTES.md`.
 `test_rls_isolation.py`, `test_workspace_integration.py` and
 `test_push_pull_integration.py` need real Supabase/Fly.io/GitHub credentials
 (`test_execute_bash_env_isolation.py` does not — it is pure). `agent_loop.py`'s tool dispatch and
@@ -108,6 +121,7 @@ reasoned through.
 - **`docs/DEPLOYMENT.md`** — putting the backend on Render and the frontend on
   Vercel, matching the spec's tech stack (§2).
 - **`docs/PHASE1_NOTES.md`** / **`docs/PHASE2_NOTES.md`** / **`docs/PHASE3_NOTES.md`**
+  / **`docs/PHASE4_1_4_2_NOTES.md`**
   — what's real, what's a documented rough edge, and what the next phase
   needs to pick up.
 - **`NOTICES.md`** — third-party attribution per §29. Aider, OpenHands, and

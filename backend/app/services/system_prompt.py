@@ -365,10 +365,10 @@ class DynamicSections:
 
     repo_context: str  # always present — §17 item 4, never omitted
     current_datetime: str  # always present — §17 item 7, never omitted
-    project_knowledge: str | None = None  # Phase 4 (memory) — None until then, see PHASE3_NOTES.md
+    project_knowledge: str | None = None  # §21, Phase 4.2 — None unless a note has triggered so far this session
     project_secrets: str | None = None  # names only, never values — None if the project has none registered
-    what_you_know_about_this_person: str | None = None  # Phase 4 (memory) — None until then
-    what_you_know_about_this_project: str | None = None  # Phase 4 (memory) — None until then
+    what_you_know_about_this_person: str | None = None  # §20, Phase 4.1 — None if build_user_memory is empty
+    what_you_know_about_this_project: str | None = None  # §20, Phase 4.1 — None if project_memory is empty
     current_plan: str | None = None  # None if sessions.plan is empty
 
 
@@ -427,6 +427,44 @@ def format_project_secrets(secret_names: list[str]) -> str | None:
         "The following secrets are available to commands you run, as environment "
         "variables — by name only; their values are never shown to you:\n" + "\n".join(lines)
     )
+
+
+def format_project_knowledge(notes: list[dict]) -> str | None:
+    """§21 — renders every Project Knowledge note that has triggered so far
+    this session (agent_loop.py's own project_knowledge.select_all_triggered
+    has already done the trigger-matching, the once-per-session bookkeeping,
+    and the accumulation across iterations by the time this is called; this
+    is pure presentation). Each dict is `{"name": str, "body": str}` —
+    deliberately plain dicts rather than importing project_knowledge.
+    ProjectKnowledgeNote here, matching format_current_plan's own convention
+    below of taking whatever shape the caller already has rather than
+    pulling in a cross-module dependency this file otherwise has none of.
+    None (→ section omitted entirely) when nothing has triggered yet, per
+    §18's own "only if non-empty" rule — the normal case early in a turn
+    loop, before anything has matched a note's trigger."""
+    if not notes:
+        return None
+    return "\n\n".join(f"### {n['name']}\n{n['body']}" for n in notes)
+
+
+def format_what_you_know_about_this_project(memory_md: str | None) -> str | None:
+    """§20 — project_memory.memory_md verbatim, or None (→ section omitted)
+    when the project has none yet (a brand new project's first few turns,
+    before any extraction has run) or it's been cleared from Settings."""
+    if not memory_md or not memory_md.strip():
+        return None
+    return memory_md.strip()
+
+
+def format_what_you_know_about_this_person(memory_md: str | None) -> str | None:
+    """§20 — build_user_memory.memory_md verbatim, or None (→ section
+    omitted) when nothing account-level has been recorded yet — the normal
+    state for most turns, since §20 explicitly allows the account-level
+    extraction call to leave this unchanged ("most turns reveal nothing
+    account-level")."""
+    if not memory_md or not memory_md.strip():
+        return None
+    return memory_md.strip()
 
 
 def format_current_plan(plan_steps: list[dict]) -> str | None:

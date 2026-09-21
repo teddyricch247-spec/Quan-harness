@@ -6,6 +6,11 @@ from app.models.schemas import (
     ProjectConnectorsAccessUpdate,
     ProjectCreate,
     ProjectDeleteRequest,
+    ProjectKnowledgeCreate,
+    ProjectKnowledgeOut,
+    ProjectKnowledgeUpdate,
+    ProjectMemoryOut,
+    ProjectMemoryUpdate,
     ProjectOut,
     ProjectUpdate,
 )
@@ -14,6 +19,8 @@ from app.repositories import (
     github_credentials as github_repo,
     llm_credentials as llm_repo,
     mcp_servers as connectors_repo,
+    project_knowledge as project_knowledge_repo,
+    project_memory as project_memory_repo,
     projects as repo,
 )
 from app.services import github_oauth, vault, workspace_service
@@ -207,3 +214,130 @@ async def put_connectors_access(
         output_summary=f"count={len(body.connector_ids)}",
     )
     return body.connector_ids
+
+
+# ---------------------------------------------------------------------------
+# Memory (§20, Phase 4.1) — "a person can view, edit, or clear both memory
+# stores directly at any time (project Settings; Connections)". This is the
+# project-scoped store; app/routers/account.py has the account-level one.
+# project_memory_log (the raw append-only material behind memory_md) is
+# deliberately not exposed here at all — §20 is explicit that it's never
+# injected into any prompt and exists only so memory_md can be rebuilt after
+# a bad extraction, not as something a person views or edits directly.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{project_id}/memory", response_model=ProjectMemoryOut)
+async def get_project_memory(project_id: str, user: AuthedUser = Depends(verified_user)):
+    memory_md = await project_memory_repo.get_owned(user.user_id, project_id)
+    if memory_md is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    return ProjectMemoryOut(project_id=project_id, memory_md=memory_md)
+
+
+@router.put("/{project_id}/memory", response_model=ProjectMemoryOut)
+async def put_project_memory(project_id: str, body: ProjectMemoryUpdate, user: AuthedUser = Depends(verified_user)):
+    """A direct, deterministic edit — never something that goes through the
+    agent (§20: the agent has no memory-writing tool at all)."""
+    ok = await project_memory_repo.update_owned(user.user_id, project_id, body.memory_md)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    await audit.record(
+        user.user_id, "memory", "update_project_memory", True, project_id=project_id, initiated_by="user"
+    )
+    return ProjectMemoryOut(project_id=project_id, memory_md=body.memory_md)
+
+
+@router.delete("/{project_id}/memory", response_model=ProjectMemoryOut)
+async def clear_project_memory(project_id: str, user: AuthedUser = Depends(verified_user)):
+    """Resets memory_md to "" (the curated index only — see
+    project_memory_repo.clear_owned's own docstring for why
+    project_memory_log is deliberately untouched by this). Returns the
+    now-empty state rather than 204: this is a reset, not a removal of the
+    project_memory row itself, so there's real content worth showing back —
+    a deliberate, small deviation from this router's own delete_secret/
+    delete_project convention of a bare 204."""
+    ok = await project_memory_repo.clear_owned(user.user_id, project_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    await audit.record(
+        user.user_id, "memory", "clear_project_memory", True, project_id=project_id, initiated_by="user"
+    )
+    return ProjectMemoryOut(project_id=project_id, memory_md="")
+
+
+# ---------------------------------------------------------------------------
+# Project Knowledge (§21, Phase 4.2) — CRUD from the project's own Settings.
+# Every note here is human-authored and never written by the agent (no tool
+# exists for it, symmetric with memory above); agent_loop.py only ever reads
+# these to check trigger conditions each turn-loop iteration.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{project_id}/knowledge", response_model=list[ProjectKnowledgeOut])
+async def list_project_knowledge(project_id: str, user: AuthedUser = Depends(verified_user)):
+    rows = await project_knowledge_repo.list_owned(user.user_id, project_id)
+    if rows is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    return [ProjectKnowledgeOut(**row) for row in rows]
+
+
+@router.post("/{project_id}/knowledge", response_model=ProjectKnowledgeOut, status_code=status.HTTP_201_CREATED)
+async def create_project_knowledge(
+    project_id: str, body: ProjectKnowledgeCreate, user: AuthedUser = Depends(verified_user)
+):
+    if not body.name.strip() or not body.trigger_value.strip():
+        raise HTTPException(status_code=400, detail="name and trigger_value must both be non-empty.")
+    row = await project_knowledge_repo.create_owned(
+        user.user_id, project_id, body.name, body.body, body.trigger_type, body.trigger_value
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    await audit.record(
+        user.user_id,
+        "memory",
+        "create_project_knowledge",
+        True,
+        project_id=project_id,
+        output_summary=body.name,
+        initiated_by="user",
+    )
+    return ProjectKnowledgeOut(**row)
+
+
+@router.patch("/{project_id}/knowledge/{note_id}", response_model=ProjectKnowledgeOut)
+async def update_project_knowledge(
+    project_id: str, note_id: str, body: ProjectKnowledgeUpdate, user: AuthedUser = Depends(verified_user)
+):
+    fields = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
+    if not fields:
+        raise HTTPException(status_code=400, detail="No fields to update.")
+    row = await project_knowledge_repo.update_owned(user.user_id, project_id, note_id, fields)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Note not found.")
+    await audit.record(
+        user.user_id,
+        "memory",
+        "update_project_knowledge",
+        True,
+        project_id=project_id,
+        output_summary=note_id,
+        initiated_by="user",
+    )
+    return ProjectKnowledgeOut(**row)
+
+
+@router.delete("/{project_id}/knowledge/{note_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_project_knowledge(project_id: str, note_id: str, user: AuthedUser = Depends(verified_user)):
+    deleted = await project_knowledge_repo.delete_owned(user.user_id, project_id, note_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Note not found.")
+    await audit.record(
+        user.user_id,
+        "memory",
+        "delete_project_knowledge",
+        True,
+        project_id=project_id,
+        output_summary=note_id,
+        initiated_by="user",
+    )

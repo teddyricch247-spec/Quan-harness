@@ -57,7 +57,10 @@ from dataclasses import dataclass
 
 from app.repositories import approval_requests as approval_requests_repo
 from app.repositories import audit as audit_repo
+from app.repositories import build_user_memory as build_user_memory_repo
 from app.repositories import mcp_servers as mcp_servers_repo
+from app.repositories import project_knowledge as project_knowledge_repo
+from app.repositories import project_memory as project_memory_repo
 from app.repositories import project_secrets as project_secrets_repo
 from app.repositories import projects as projects_repo
 from app.repositories import session_events as session_events_repo
@@ -68,7 +71,9 @@ from app.services import (
     file_tools,
     llm_client,
     mcp_tools,
+    memory_extraction,
     message_builder,
+    project_knowledge,
     repo_map,
     shell_tools,
     stuck_detector,
@@ -227,7 +232,10 @@ def _reconstruct_viewed_paths(events: list[dict]) -> set[str]:
     """§14.2: 'every path seen in a tool_call/tool_result event this
     session' — file_tools.py's own docstring names this exact reconstruction.
     A create_file also counts (see module docstring's file_tools.py note) so
-    a freshly created file can be edited without an extra round-trip view."""
+    a freshly created file can be edited without an extra round-trip view.
+    Also doubles as §21's "a file the agent touches" signal for Project
+    Knowledge's keyword/path triggers — see project_knowledge.py's own
+    docstring for why that reuse was the deliberate, smaller choice."""
     viewed = set()
     for event in events:
         if event["event_type"] != "tool_call":
@@ -238,6 +246,33 @@ def _reconstruct_viewed_paths(events: list[dict]) -> set[str]:
             if path:
                 viewed.add(path)
     return viewed
+
+
+def _reconstruct_triggered_knowledge_ids(events: list[dict]) -> set[str]:
+    """§21: 'a note is only ever injected once per session, the first time
+    it triggers.' Reconstructed from the durable event log the same way
+    _reconstruct_viewed_paths is, and for the identical reason: _run_inner
+    starts fresh on every resumed turn (a new message after 'completed', a
+    crash resume, an approval resume), so a set held only in this
+    function's local variables would forget every note an earlier turn of
+    the same session already triggered, letting it re-fire and re-bloat the
+    prompt on turn two. project_knowledge_injected is a pure bookkeeping
+    event — message_builder.build_messages' own fallthrough already skips
+    any event_type it doesn't explicitly render (see that module's
+    docstring), so this never reaches the model as conversation content."""
+    return {event["content"]["note_id"] for event in events if event["event_type"] == "project_knowledge_injected"}
+
+
+def _latest_user_text(events: list[dict]) -> str:
+    """The most recent user-authored text (a message or an interrupt) —
+    shared by _extract_keywords (repo_map's ranking) and §21's keyword
+    trigger (project_knowledge.select_newly_triggered's task_text), so both
+    use exactly the same 'what is the person actually asking for right now'
+    signal rather than two independently-drifting definitions of it."""
+    for event in reversed(events):
+        if event["event_type"] in ("message", "user_interrupt") and event["role"] == "user":
+            return event["content"].get("text", "")
+    return ""
 
 
 def _extract_keywords(events: list[dict]) -> list[str]:
@@ -252,12 +287,7 @@ def _extract_keywords(events: list[dict]) -> list[str]:
         "the", "a", "an", "and", "or", "but", "to", "of", "in", "on", "for",
         "is", "are", "it", "this", "that", "with", "as", "be", "at", "by",
     }
-    text = ""
-    for event in reversed(events):
-        if event["event_type"] in ("message", "user_interrupt") and event["role"] == "user":
-            text = event["content"].get("text", "")
-            break
-    words = re.findall(r"[a-zA-Z0-9_]+", text.lower())
+    words = re.findall(r"[a-zA-Z0-9_]+", _latest_user_text(events).lower())
     return [w for w in words if len(w) > 2 and w not in stopwords]
 
 
@@ -586,6 +616,44 @@ def _resolve_permission_for_call(name: str, merged: tool_schemas.MergedToolSchem
 # ---------------------------------------------------------------------------
 
 
+async def _finish_turn(
+    session_id: str,
+    project: dict,
+    user_id: str,
+    status: str,
+    report_text: str,
+    credential: llm_client.ResolvedCredential,
+) -> None:
+    """The one place every genuine 'this turn is over' exit point in
+    _run_inner below converges — status in {'completed', 'stuck'} only; a
+    'failed' exit (LlmCallFailedError, NoLlmCredentialError, an unhandled
+    exception caught in _run) does NOT call this, and neither does a
+    waiting_approval return, which isn't a turn ending at all. Two things
+    happen here, in this order and for this reason:
+
+    1. Write the status and broadcast 'done' over SSE — exactly what this
+       function replaces at each call site, unchanged in behavior.
+    2. Only then, §20's memory extraction ('whenever a turn loop ends in
+       completed or stuck'). Broadcasting first means a slow or failing
+       extraction call is invisible to the person's own view of their
+       session — they see their turn finish the moment it actually does,
+       not whenever the backend also happens to finish writing memory.
+
+    memory_extraction.extract_after_turn is already best-effort internally
+    (see its own docstring) — every exception is caught inside the three
+    pieces it gathers. The wrap here is defense in depth on top of that: if
+    a bug in that module somehow still raised, letting it propagate would
+    reach _run's own outer catch-all and flip a session the person has
+    already been told is 'completed'/'stuck' over to 'failed' — a confusing
+    double status transition this must never cause."""
+    await sessions_repo.update_fields(session_id, {"status": status})
+    _broadcast_done(session_id, status)
+    try:
+        await memory_extraction.extract_after_turn(project, user_id, session_id, report_text, credential)
+    except Exception:  # noqa: BLE001 — see docstring: must never turn a completed/stuck turn into a failed one
+        pass
+
+
 async def _run(session_id: str, user_id: str) -> None:
     try:
         await _run_inner(session_id, user_id)
@@ -720,11 +788,51 @@ async def _run_inner(session_id: str, user_id: str) -> None:
             project["id"], opened_paths=viewed_paths, task_keywords=_extract_keywords(events)
         )
         secret_names = await _fetch_secret_names(user_id, project["id"])
+
+        # --- §20 memory: read-only here — writing is memory_extraction.py's
+        # job, triggered from _finish_turn below, never from mid-loop. ---
+        project_memory_md = await project_memory_repo.get_memory_md(project["id"])
+        user_memory_md = await build_user_memory_repo.get_memory_md(user_id)
+
+        # --- §21 Project Knowledge: fetched fresh each iteration (a note
+        # added mid-session should be able to trigger later in that same
+        # session), trigger-matched against this iteration's task text and
+        # touched paths, filtered to what hasn't already triggered this
+        # session (reconstructed from the event log, not local state — see
+        # _reconstruct_triggered_knowledge_ids's own docstring). Anything
+        # newly triggering gets its bookkeeping event appended immediately,
+        # before it can trigger again on the very next iteration. The
+        # dynamic section itself is built from *every* note triggered so
+        # far this session (select_all_triggered), not just this
+        # iteration's newly_triggered — "injected once per session" governs
+        # when the bookkeeping event is written and stops a note firing
+        # twice, it does not mean the note should vanish from the model's
+        # context the moment the next iteration begins. See
+        # project_knowledge.select_all_triggered's own docstring. ---
+        knowledge_notes = [project_knowledge.note_from_row(r) for r in await project_knowledge_repo.list_for_project(project["id"])]
+        already_triggered_knowledge_ids = _reconstruct_triggered_knowledge_ids(events)
+        newly_triggered = project_knowledge.select_newly_triggered(
+            knowledge_notes,
+            task_text=_latest_user_text(events),
+            touched_paths=viewed_paths,
+            already_triggered_ids=already_triggered_knowledge_ids,
+        )
+        for note in newly_triggered:
+            await _append(session_id, "system", "project_knowledge_injected", {"note_id": note.id, "name": note.name})
+        all_triggered_knowledge = project_knowledge.select_all_triggered(
+            knowledge_notes, already_triggered_knowledge_ids, newly_triggered
+        )
+
         dynamic = system_prompt.DynamicSections(
             repo_context=repo_context,
             current_datetime=system_prompt.format_current_datetime(datetime.datetime.now(datetime.timezone.utc)),
             current_plan=system_prompt.format_current_plan(session.get("plan") or []),
             project_secrets=system_prompt.format_project_secrets(secret_names),
+            project_knowledge=system_prompt.format_project_knowledge(
+                [{"name": n.name, "body": n.body} for n in all_triggered_knowledge]
+            ),
+            what_you_know_about_this_person=system_prompt.format_what_you_know_about_this_person(user_memory_md),
+            what_you_know_about_this_project=system_prompt.format_what_you_know_about_this_project(project_memory_md),
         )
         system_text = system_prompt.assemble(dynamic)
         tools = tool_schemas.build_full_tool_list(merged_mcp)
@@ -767,8 +875,9 @@ async def _run_inner(session_id: str, user_id: str) -> None:
                 continue
             if response.text:
                 await _append(session_id, "agent", "message", {"text": response.text, "step": step})
-            await sessions_repo.update_fields(session_id, {"status": "completed"})
-            _broadcast_done(session_id, "completed")
+            await _finish_turn(
+                session_id, project, user_id, "completed", response.text or "(no final message)", credential
+            )
             return
 
         if response.text:
@@ -906,8 +1015,7 @@ async def _run_inner(session_id: str, user_id: str) -> None:
             check = stuck_detector.run_stuck_detector(turn_stuck_events, already_soft_nudged_this_turn)
             if check.hard_stop:
                 await _append(session_id, "system", "stuck_notice", {"text": check.explanation, "severity": "hard"})
-                await sessions_repo.update_fields(session_id, {"status": "stuck"})
-                _broadcast_done(session_id, "stuck")
+                await _finish_turn(session_id, project, user_id, "stuck", check.explanation, credential)
                 return
             if check.soft_warning:
                 already_soft_nudged_this_turn = True
@@ -917,8 +1025,9 @@ async def _run_inner(session_id: str, user_id: str) -> None:
             await sessions_repo.update_fields(session_id, {"turn_iteration_count": turn_iteration_count})
             if turn_iteration_count >= max_iterations:
                 await _append(session_id, "system", "stuck_notice", {"text": "Iteration ceiling reached for this turn.", "severity": "hard"})
-                await sessions_repo.update_fields(session_id, {"status": "stuck"})
-                _broadcast_done(session_id, "stuck")
+                await _finish_turn(
+                    session_id, project, user_id, "stuck", "Iteration ceiling reached for this turn.", credential
+                )
                 return
 
         # every call in this response executed (or the function already

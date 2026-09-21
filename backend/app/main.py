@@ -1,5 +1,5 @@
 """
-Quan Harness — orchestration backend, Phases 1-3.
+Quan Harness — orchestration backend, Phases 1-3 + 4.1/4.2.
 
 Owns authentication verification, the data model, and the agent's reasoning
 loop — never runs a task's arbitrary shell commands itself (§2), except via
@@ -9,7 +9,9 @@ connectors), Projects + Sessions CRUD, and the deterministic Platform
 Operations actions (§24). Phase 2 adds: the Workspace Service, Push/Pull,
 checkpoints, and project secrets (§14, §23, §25). Phase 3 adds: the turn
 loop, the system prompt, compaction, stuck detection, and the agent-facing
-HTTP surface (§16-§19) — see /docs/PHASE3_NOTES.md.
+HTTP surface (§16-§19) — see /docs/PHASE3_NOTES.md. Phase 4.1/4.2 add: the
+Memory System and Project Knowledge (§20-§21) — see
+/docs/PHASE4_1_4_2_NOTES.md.
 
 Run locally: `uvicorn app.main:app --reload` from the backend/ directory, after
 copying .env.example to .env and filling it in (see /docs/YOUR_SETUP_CHECKLIST.md).
@@ -35,8 +37,8 @@ settings = get_settings()
 
 app = FastAPI(
     title="Quan Harness API",
-    version="0.3.0-phase3",
-    description="Orchestration backend for Quan Harness — Phase 3: turn loop, system prompt, compaction, stuck detection.",
+    version="0.4.0-phase4.1-4.2",
+    description="Orchestration backend for Quan Harness — Phase 4.1/4.2: Memory System, Project Knowledge.",
 )
 
 app.add_middleware(
@@ -61,4 +63,4 @@ app.include_router(audit_log.router)
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "phase": 3}
+    return {"status": "ok", "phase": "4.1/4.2"}

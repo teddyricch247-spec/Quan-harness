@@ -303,3 +303,81 @@ class TestBroadSelectNeverLeaksARowCount:
         finally:
             client_a.table("projects").delete().eq("id", a_project["id"]).execute()
             client_b.table("projects").delete().eq("id", b_project["id"]).execute()
+
+
+class TestMemoryAndProjectKnowledgeIsolation:
+    """§20/§21, Phase 4.1/4.2 — project_memory, project_memory_log, build_user_memory,
+    and project_knowledge all follow the same project-join (or, for build_user_memory,
+    direct user_id) RLS shape every other table in this file already uses; this class
+    exists so that shape is verified for these four specifically, not assumed by
+    similarity to the tables above."""
+
+    def _make_project(self, client, name="rls-memory-project"):
+        return client.table("projects").insert({"user_id": _user_id(client), "name": name}).execute().data[0]
+
+    def test_project_memory_isolated_via_project_join(self, client_a, client_b):
+        project = self._make_project(client_a)
+        row = client_a.table("project_memory").upsert(
+            {"project_id": project["id"], "memory_md": "rls-test memory"}
+        ).execute().data[0]
+        try:
+            assert client_b.table("project_memory").select("*").eq("project_id", row["project_id"]).execute().data == []
+        finally:
+            client_a.table("projects").delete().eq("id", project["id"]).execute()  # cascades project_memory
+
+    def test_project_memory_log_isolated_via_project_join(self, client_a, client_b):
+        project = self._make_project(client_a, "rls-memory-log-project")
+        session = client_a.table("sessions").insert({"project_id": project["id"], "title": "rls-test"}).execute().data[0]
+        row = client_a.table("project_memory_log").insert(
+            {"project_id": project["id"], "session_id": session["id"], "report": "rls-test report"}
+        ).execute().data[0]
+        try:
+            assert client_b.table("project_memory_log").select("*").eq("id", row["id"]).execute().data == []
+        finally:
+            client_a.table("projects").delete().eq("id", project["id"]).execute()  # cascades session + log row
+
+    def test_build_user_memory_isolated_directly_by_user_id(self, client_a, client_b):
+        """The one table in this class scoped directly by user_id rather than through
+        a project join — same reason audit_log gets its own dedicated test above."""
+        row = client_a.table("build_user_memory").upsert(
+            {"user_id": _user_id(client_a), "memory_md": "rls-test account memory"}
+        ).execute().data[0]
+        try:
+            assert client_b.table("build_user_memory").select("*").eq("user_id", row["user_id"]).execute().data == []
+        finally:
+            client_a.table("build_user_memory").delete().eq("user_id", row["user_id"]).execute()
+
+    def test_project_knowledge_isolated_via_project_join(self, client_a, client_b):
+        project = self._make_project(client_a, "rls-knowledge-project")
+        note = client_a.table("project_knowledge").insert(
+            {
+                "project_id": project["id"],
+                "name": "rls-test note",
+                "body": "body text",
+                "trigger_type": "keyword",
+                "trigger_value": "rls",
+            }
+        ).execute().data[0]
+        try:
+            assert client_b.table("project_knowledge").select("*").eq("id", note["id"]).execute().data == []
+        finally:
+            client_a.table("projects").delete().eq("id", project["id"]).execute()  # cascades project_knowledge
+
+    def test_project_knowledge_injected_event_isolated_via_session_and_project_join(self, client_a, client_b):
+        """The new session_events.event_type value added in 0007 rides the exact same
+        RLS policy every other event_type already does — this confirms the migration's
+        CHECK-constraint change didn't need, and didn't get, a policy change to match."""
+        project = self._make_project(client_a, "rls-knowledge-event-project")
+        session = client_a.table("sessions").insert({"project_id": project["id"], "title": "rls-test"}).execute().data[0]
+        event = client_a.table("session_events").insert(
+            {
+                "session_id": session["id"],
+                "role": "system",
+                "event_type": "project_knowledge_injected",
+                "content": {"note_id": "00000000-0000-0000-0000-000000000000", "name": "rls-test"},
+            }
+        ).execute().data[0]
+        try:
+            assert client_b.table("session_events").select("*").eq("id", event["id"]).execute().data == []
+        finally:
+            client_a.table("projects").delete().eq("id", project["id"]).execute()

@@ -99,7 +99,10 @@ create table audit_log (
                                -- | 'push' | 'pull' | 'checkpoint_restore'
                                -- | 'plan' (update_plan) | 'unknown' (a tool name the agent loop doesn't recognize)
                                -- | 'mcp:unavailable' (a connector tool no longer granted to the project)
+                               -- | 'memory' (a person's own view/edit/clear of project_memory,
+                               --   build_user_memory, or a project_knowledge note — §20/§21, Phase 4.1/4.2)
                                -- Comment-only addition after Phase 3 -- no schema change, nothing to re-run.
+                               -- Comment-only addition after Phase 4.1/4.2 -- likewise.
     action text not null,
     input jsonb,
     output_summary text,

@@ -92,3 +92,74 @@ def test_format_current_plan_renders_status_marks():
     assert "[x] write tests" in text
     assert "[~] wire router" in text
     assert "[ ] update docs" in text
+
+
+# --- Phase 4.1/4.2: format_project_knowledge, format_what_you_know_about_* ---
+
+
+def test_format_project_knowledge_none_when_empty():
+    assert sp.format_project_knowledge([]) is None
+
+
+def test_format_project_knowledge_renders_name_and_body():
+    notes = [{"name": "Auth wrapper", "body": "see auth/README"}, {"name": "Migrations", "body": "NNN_x.sql"}]
+    text = sp.format_project_knowledge(notes)
+    assert "### Auth wrapper" in text
+    assert "see auth/README" in text
+    assert "### Migrations" in text
+    assert "NNN_x.sql" in text
+
+
+def test_format_what_you_know_about_this_project_none_when_empty():
+    assert sp.format_what_you_know_about_this_project("") is None
+    assert sp.format_what_you_know_about_this_project(None) is None
+    assert sp.format_what_you_know_about_this_project("   ") is None
+
+
+def test_format_what_you_know_about_this_project_returns_stripped_text():
+    assert sp.format_what_you_know_about_this_project("  uses FastAPI + Next.js  ") == "uses FastAPI + Next.js"
+
+
+def test_format_what_you_know_about_this_person_none_when_empty():
+    assert sp.format_what_you_know_about_this_person("") is None
+    assert sp.format_what_you_know_about_this_person(None) is None
+
+
+def test_format_what_you_know_about_this_person_returns_stripped_text():
+    assert sp.format_what_you_know_about_this_person("  prefers concise reports  ") == "prefers concise reports"
+
+
+def test_assemble_includes_memory_and_knowledge_sections_when_present():
+    text = sp.assemble(
+        _minimal_dynamic(
+            project_knowledge=sp.format_project_knowledge([{"name": "A", "body": "B"}]),
+            what_you_know_about_this_person=sp.format_what_you_know_about_this_person("likes short reports"),
+            what_you_know_about_this_project=sp.format_what_you_know_about_this_project("uses pytest"),
+        )
+    )
+    assert "<PROJECT_KNOWLEDGE>" in text and "### A" in text
+    assert "<WHAT_YOU_KNOW_ABOUT_THIS_PERSON>" in text and "likes short reports" in text
+    assert "<WHAT_YOU_KNOW_ABOUT_THIS_PROJECT>" in text and "uses pytest" in text
+
+
+def test_dynamic_section_order_matches_18s_own_list():
+    text = sp.assemble(
+        _minimal_dynamic(
+            project_knowledge=sp.format_project_knowledge([{"name": "A", "body": "B"}]),
+            project_secrets=sp.format_project_secrets(["STRIPE_KEY"]),
+            what_you_know_about_this_person=sp.format_what_you_know_about_this_person("p"),
+            what_you_know_about_this_project=sp.format_what_you_know_about_this_project("q"),
+            current_plan="[ ] step",
+        )
+    )
+    order = [
+        "<REPO_CONTEXT>",
+        "<PROJECT_KNOWLEDGE>",
+        "<PROJECT_SECRETS>",
+        "<WHAT_YOU_KNOW_ABOUT_THIS_PERSON>",
+        "<WHAT_YOU_KNOW_ABOUT_THIS_PROJECT>",
+        "<CURRENT_PLAN>",
+        "<CURRENT_DATETIME>",
+    ]
+    positions = [text.index(tag) for tag in order]
+    assert positions == sorted(positions)

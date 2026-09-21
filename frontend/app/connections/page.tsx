@@ -8,6 +8,7 @@ const ITEMS = [
   { href: "/connections/llm-providers", title: "LLM Providers", desc: "BYOK credentials for the agent." },
   { href: "/connections/github", title: "GitHub Connection", desc: "The sync credential used by Push/Pull. Never reachable by the agent." },
   { href: "/connections/connectors", title: "Connectors", desc: "MCP servers — the only way the agent reaches anything outside its own workspace." },
+  { href: "/connections/memory", title: "Memory", desc: "What the agent has learned about you, across every project — view, edit, or clear it." },
 ];
 
 export default function ConnectionsPage() {

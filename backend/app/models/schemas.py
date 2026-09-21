@@ -293,3 +293,57 @@ class ApprovalDecision(BaseModel):
 class TurnStartResult(BaseModel):
     session_id: str
     status: str
+
+
+# ---------------------------------------------------------------------------
+# Memory (§20) — Phase 4.1
+# ---------------------------------------------------------------------------
+
+
+class ProjectMemoryOut(BaseModel):
+    project_id: str
+    memory_md: str
+
+
+class ProjectMemoryUpdate(BaseModel):
+    memory_md: str
+
+
+class BuildUserMemoryOut(BaseModel):
+    memory_md: str
+
+
+class BuildUserMemoryUpdate(BaseModel):
+    memory_md: str
+
+
+# ---------------------------------------------------------------------------
+# Project Knowledge (§21) — Phase 4.2
+# ---------------------------------------------------------------------------
+
+ProjectKnowledgeTriggerType = Literal["keyword", "path"]
+
+
+class ProjectKnowledgeCreate(BaseModel):
+    name: str
+    body: str
+    trigger_type: ProjectKnowledgeTriggerType
+    trigger_value: str
+
+
+class ProjectKnowledgeUpdate(BaseModel):
+    name: str | None = None
+    body: str | None = None
+    trigger_type: ProjectKnowledgeTriggerType | None = None
+    trigger_value: str | None = None
+
+
+class ProjectKnowledgeOut(BaseModel):
+    id: str
+    project_id: str
+    name: str
+    body: str
+    trigger_type: str
+    trigger_value: str
+    created_at: datetime
+    updated_at: datetime
