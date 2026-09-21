@@ -20,7 +20,7 @@ site, or make a real-world decision. Roughly in the order you'll hit them.
       JWKS endpoint.
 - [ ] **Database → Extensions** — confirm `pgcrypto` and `supabase_vault` are
       both enabled (they're on by default on new projects; check anyway).
-- [ ] Run the six migration files in `db/migrations/` **in order** — see
+- [ ] Run the seven migration files in `db/migrations/` **in order** — see
       `db/migrations/README.md` for the exact steps (SQL Editor is the easiest
       path if you don't already use the Supabase CLI).
 - [ ] **Authentication → Sign In / Providers** — confirm Email is enabled and
