@@ -63,44 +63,41 @@ the one-click OAuth flow won't until this exists.
       scope. Push creates a repository on that credential's behalf the first
       time it runs, so it needs write access, not just read.
 
-## 3. Fly.io (Phase 2 — the Workspace Service, §23)
+## 3. Fly.io Sprites (Phase 2 — the Workspace Service, §23)
 
-Every project's workspace is a real Fly.io Machine + persistent Volume,
-created lazily the first time it's needed. **Use a dedicated Fly
-organization for this, never your personal one** — every signed-up user's
-projects will end up as Fly Apps inside whichever org you point this at, and
-you don't want that mixed in with your own unrelated Fly usage or billing.
+Every project's workspace is a real Fly.io Sprite (https://sprites.dev) — a
+persistent, hardware-isolated Linux sandbox with its own disk, created lazily
+the first time it's needed. A Sprite hibernates automatically when idle and
+wakes on the next request, so there's no manual start/stop step to configure
+here the way the old Fly Machines integration needed.
 
-- [ ] Create a Fly.io account and a **new, dedicated organization** for this
-      product at [fly.io/dashboard](https://fly.io/dashboard) (Organizations →
-      New Organization).
-- [ ] **Access Tokens** (in that org's dashboard, or `fly tokens create org`
-      via the `flyctl` CLI) — create a token scoped to the new org and copy it
-      into `backend/.env` as `FLY_API_TOKEN`.
-- [ ] Copy the org's slug (shown in its dashboard URL) into `backend/.env` as
-      `FLY_ORG_SLUG`.
-- [ ] Pick a region close to wherever most of your users will be and set
-      `FLY_REGION` (defaults to `iad` — US East). All of a user's project
-      workspaces currently provision in this one region — see
-      `/docs/PHASE2_NOTES.md` if you need per-project region choice later.
-- [ ] Decide on `WORKSPACE_IMAGE` (defaults to a bare `ubuntu:24.04`).
-      `ensure_workspace()` bootstraps `git`/`python3` on first boot either
-      way, but if you want `run_lint` to work out of the box, either add
-      `flake8`/`node`/`npm` to that bootstrap step yourself or build a small
-      custom image with them preinstalled and point `WORKSPACE_IMAGE` at it.
-      See `/docs/PHASE2_NOTES.md`'s rough-edges section — this one's flagged,
-      not silently guessed at.
-- [ ] **Set a spending/usage alert on the new org** before real users show up
-      — nothing in this codebase caps how many workspaces can be provisioned
-      or how long they stay running beyond §23.1's own sleep-when-idle
-      behavior working correctly, and a bug in that behavior would show up as
-      a Fly bill, not an error message.
+- [ ] Create a Fly.io account at [fly.io/dashboard](https://fly.io/dashboard)
+      if you don't have one already.
+- [ ] Create a Sprites API token at
+      [sprites.dev/account](https://sprites.dev/account) (or run
+      `sprite org auth` with the Sprites CLI if you'd rather authenticate that
+      way) and copy it into `backend/.env` as `SPRITES_API_TOKEN`. The token
+      is scoped to one org on its own — there's no separate org-slug or
+      region setting to fill in, unlike the old Machines setup.
+- [ ] **For now** (you and your dev team testing this together): your
+      **personal** Fly.io org is fine — new accounts get a $30 usage credit,
+      which comfortably covers development. **Before you open this up to
+      other people**, create a **dedicated org** for it (Organizations → New
+      Organization in the Fly dashboard) and generate a new token scoped to
+      that org instead — every signed-up user's Sprite will end up inside
+      whichever org this token points at, and you don't want that mixed in
+      with your own personal usage or billing once it's not just you and your
+      devs anymore.
+- [ ] **Set a spending/usage alert on whichever org you're using** before real
+      users show up — nothing in this codebase caps how many Sprites can be
+      provisioned, and a bug in the idle-hibernation behavior (which Sprites
+      handle automatically — not something this codebase commands; see
+      `/docs/PHASE2_NOTES.md`) would show up as a Fly bill, not an error
+      message.
 - [ ] Before trusting any of this, run `backend/tests/test_workspace_integration.py`
-      against this real org (see that file's own docstring for the env vars
-      it needs) — implementation order step 5 explicitly calls for this to be
-      verified in isolation before anything else depends on it, and it
-      couldn't be run in the environment this was originally built in (no
-      live Fly account available there).
+      against this real account (see that file's own docstring for the env
+      vars it needs) — implementation order step 5 explicitly calls for this
+      to be verified in isolation before anything else depends on it.
 
 ## 4. Environment variables
 
@@ -110,7 +107,7 @@ inline comments on where each value comes from. Short version:
 
 **backend/.env** needs: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`,
 `SUPABASE_ANON_KEY`, `SUPABASE_JWT_SECRET` (maybe blank, see above),
-`GITHUB_OAUTH_CLIENT_ID` / `_SECRET`, `FLY_API_TOKEN`, `FLY_ORG_SLUG`
+`GITHUB_OAUTH_CLIENT_ID` / `_SECRET`, `SPRITES_API_TOKEN`
 (Phase 2 — §3 above), `FRONTEND_URL`, `BACKEND_PUBLIC_URL`,
 `CORS_ALLOWED_ORIGINS`.
 
@@ -143,6 +140,8 @@ matching the spec's own tech stack (§2). Once deployed, come back and update:
       before this is public.
 - [ ] **A production GitHub OAuth App** (separate from your dev one, per §2
       above), pointed at your real domain.
+- [ ] **A dedicated Fly.io org for Sprites** (per §3 above) — don't launch to
+      other people on your personal org's token.
 
 ## Known rough edges to know about going in
 
@@ -160,7 +159,8 @@ matching the spec's own tech stack (§2). Once deployed, come back and update:
   follow it. If a specific connector's OAuth connect fails, the error shows up
   plainly in the UI; "static token" auth mode is the reliable fallback for any
   server that just issues a plain bearer token.
-- **Phase 2's rough edges** (the Fly Machines `/exec` response shape, the bare
-  base workspace image, tree-sitter being optional, the GitHub auth header
+- **Phase 2's rough edges** (an unverified `sprite.run(..., dir=...)` kwarg
+  name in the Sprites port — see `workspace_service.py`'s own module
+  docstring — plus tree-sitter being optional and the GitHub auth header
   format) are all in `/docs/PHASE2_NOTES.md` rather than duplicated here —
   read that before relying on the Workspace Service or Push/Pull in production.

@@ -5,14 +5,26 @@ real, what's a documented rough edge, and every place this build had to make a
 call the spec excerpt didn't fully pin down. Read this before touching any of
 Phase 2's code, and before starting Phase 3.
 
+**Update — ported to Fly.io Sprites.** The Workspace Service originally
+targeted the Fly Machines API; it's since been rewritten against Fly's newer
+Sprites product (https://sprites.dev) via the official `sprites-py` SDK — see
+`workspace_service.py`'s own module docstring for exactly what changed and
+why. Everything below describes the module as originally built; the two rough
+edges that were Machines-specific (#1 and #2) are marked resolved in place
+rather than rewritten, so this still reads as an honest history of both
+versions rather than pretending the Machines integration never happened.
+
 ## What's real and working
 
 - **Workspace Service** (`app/services/workspace_service.py`) — a real Fly.io
-  Machines API client: creates one Fly App + one persistent Volume + one
-  Machine per project, lazily on first use (§14.6); `wake()`/`sleep()` actually
-  start/stop the Machine so compute is unbilled when idle (§23.1);
-  `exec_in_workspace()` is the one primitive everything else in this phase is
-  built on.
+  Sprites client (originally Machines; see the update note above): creates
+  one Sprite per project, lazily on first use (§14.6), with its own built-in
+  persistent disk — no separate App/Volume to provision the way Machines
+  needed. Sprites hibernate and wake automatically, so `wake()`/`sleep()` no
+  longer command a start/stop the way they used to; `wake()` still forces the
+  wake-up now for the UI's benefit, and `sleep()` refreshes billing_state from
+  the Sprite's own reported status instead. `exec_in_workspace()` is still the
+  one primitive everything else in this phase is built on.
 - **File tools** (`app/services/file_tools.py` + the pure matching/syntax logic
   in `text_edit.py`) — `view_file`/`str_replace`/`create_file`, all three
   working against a real workspace over the exec primitive above. `str_replace`
@@ -67,7 +79,7 @@ Phase 2's code, and before starting Phase 3.
 ## Testing — what actually ran, and what needs real infrastructure
 
 Same split Phase 1 landed on with `test_rls_isolation.py`: pure logic gets
-real, run tests; anything that needs a live Fly.io Machine or a live GitHub
+real, run tests; anything that needs a live Fly.io Sprite or a live GitHub
 repo is written as a real integration test but documented as requiring real
 credentials, since no such account was available while building this.
 
@@ -98,29 +110,28 @@ workspace, run a command, confirm persistence across a sleep/wake cycle";
 "a real end-to-end test that a model-scope execute_bash call genuinely cannot
 reach the internal clone/checkpoint machinery's own credentials"). Both read
 credentials straight from the environment the same way `test_rls_isolation.py`
-does — `QH_TEST_PROJECT_ID`, `QH_TEST_USER_ID`, plus `FLY_API_TOKEN`/
-`FLY_ORG_SLUG` and a connected GitHub credential. **Run these against a real
-account before trusting this in production.**
+does — `QH_TEST_PROJECT_ID`, `QH_TEST_USER_ID`, plus `SPRITES_API_TOKEN`
+(originally `FLY_API_TOKEN`/`FLY_ORG_SLUG` — see the update note at the top)
+and a connected GitHub credential. **Run these against a real account before
+trusting this in production.**
 
 ## Rough edges (same spirit as Phase 1's OAuth section — flagged, not hidden)
 
-1. **Fly Machines' `/exec` endpoint response shape isn't in Fly's indexed API
-   reference** as of this writing — it's documented piecemeal (the `fly
-   machine exec` flyctl command, third-party examples). `workspace_service.py`
-   parses the response defensively (a couple of plausible field-name
-   variants) specifically because of this gap. Verify the actual shape against
-   a real account and tighten the parsing if it's wrong.
-2. **The base workspace image is bare Ubuntu** (`config.py`'s
-   `workspace_image` default) with no toolchain preinstalled. `ensure_workspace()`
-   now does a best-effort bootstrap install of `git`/`python3`/`pip` on first
-   provision (added specifically because checkpoints and file-tool writes are
-   load-bearing on both), but `flake8`/`node`/`eslint` are **not** bootstrapped
-   — `run_lint` will fail against a fresh workspace until either those are
-   added to the bootstrap step or `workspace_image` is pointed at a
-   preconfigured image. Left as a rough edge rather than guessed at, since the
-   right choice depends on real usage patterns (most projects will `npm
-   install`/`pip install` their own toolchain anyway, which changes what's
-   worth pre-baking).
+1. ~~**Fly Machines' `/exec` endpoint response shape isn't in Fly's indexed
+   API reference.**~~ **Resolved by the Sprites port** — moot now that
+   `workspace_service.py` goes through the official `sprites-py` SDK instead
+   of parsing raw HTTP responses by hand. That SDK is itself brand new
+   (first stable release days before this port was written) with its own,
+   smaller, unverified surface — see `workspace_service.py`'s own ROUGH EDGE
+   note on the `dir=` exec kwarg for what replaced this.
+2. ~~**The base workspace image is bare Ubuntu with no toolchain
+   preinstalled.**~~ **Resolved by the Sprites port** — every Sprite ships
+   with git, Python, Node, and other common tools preinstalled, so
+   `ensure_workspace()`'s old bootstrap-install step is gone entirely.
+   `flake8`/`eslint` specifically still aren't preinstalled, so `run_lint`
+   still depends on the project's own `npm install`/`pip install` the same
+   way it always has — that part of this rough edge was never
+   image-specific and still applies.
 3. **Tree-sitter is optional, not a hard dependency** (`text_edit.py`'s
    `_tree_sitter_check`) — not added to `requirements.txt` because its exact
    current package/version shape couldn't be verified against a real install
@@ -155,6 +166,15 @@ account before trusting this in production.**
    JSX files specifically, gaining zero false positives). Left as-is rather
    than guessed at under time pressure — the risk of a wrong scope decision
    here seemed worse than documenting the gap plainly.
+6. **The Sprites port itself is unverified against a live account** (added
+   with the update above) — `sprite.run(..., dir=cwd)`'s exact kwarg name,
+   and the exception types raised on a timed-out or failed exec, are both
+   inferred from `sprites-py`'s public docs/README rather than a source-level
+   signature check — see `workspace_service.py`'s own module docstring for
+   specifics. Run `test_workspace_integration.py` against a real Sprites
+   account before trusting this in production; if `dir=` is wrong, the fix is
+   a one-line change to wrap the argv in `["bash", "-c", f"cd {cwd} && ..."]`
+   instead.
 
 ## Design decisions this phase had to make that the spec excerpt didn't spell out
 

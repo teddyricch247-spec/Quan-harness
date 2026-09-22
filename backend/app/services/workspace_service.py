@@ -1,64 +1,96 @@
 """
-§23: the Workspace Service. Implementation order step 5 — "stood up and tested in
-isolation... before wiring any agent tool to it." This module is that foundation;
-app/services/file_tools.py, shell_tools.py, checkpoints.py, and git_sync.py are all
-built on top of exec_in_workspace() below and never talk to Fly directly themselves.
+§23: the Workspace Service — the sandboxed environment behind every project
+(§14.6: "the model's tools ... operate against a project's own persistent
+workspace, provisioned lazily on first use"). exec_in_workspace() is the one
+primitive app/services/file_tools.py, shell_tools.py, checkpoints.py, and
+git_sync.py are all built on top of — none of them talk to Sprites directly.
 
-Backed by Fly.io Machines API (https://api.machines.dev/v1) — one Fly App and one
-persistent Volume per Quan Harness project, holding exactly one Machine that's
-started when work is happening and stopped (never billed) otherwise (§23.1: "the
-underlying Sprite must be fully off, and unbilled, when nobody's looking at it").
-"Sprite" in the rest of this codebase (project_workspaces.sprite_handle, per
-0004_projects.sql) refers to this Machine — Quan Harness's own name for it, never
-exposed to Fly or in any user-facing surface, per NOTICES.md's naming section.
+Backed by Fly.io Sprites (https://sprites.dev) via the official `sprites-py`
+SDK (PyPI: sprites-py, import name `sprites`) — one Sprite per project, holding
+its repo checkout at REPO_ROOT (app/services/workspace_paths.py). Ported from
+a Fly.io Machines integration (see git history / PHASE2_NOTES.md's "Workspace
+Service" entry) — kept identical where it mattered: same function names and
+signatures (ensure_workspace, wake, sleep, exec_in_workspace, ExecResult), same
+project_workspaces.sprite_handle / .billing_state columns, so nothing in
+file_tools.py / shell_tools.py / checkpoints.py / git_sync.py /
+routers/workspace.py / routers/projects.py had to change.
 
-ROUGH EDGE, flagged the same way Phase 1 flagged its OAuth rough edges (see
-/docs/YOUR_SETUP_CHECKLIST.md): the exec endpoint's exact response shape
-(`/v1/apps/{app}/machines/{id}/exec`) is not in Fly's indexed Machines Resource API
-reference as of this writing — it's documented piecemeal (the `fly machine exec`
-flyctl command, and third-party examples posting `{"cmd": ...}` to this path). The
-request/response parsing below is written defensively (accepts a couple of
-plausible field-name variants) specifically because of that gap. Verify against a
-real Fly account before relying on this in production — see the checklist.
+What's genuinely simpler on Sprites than it was on Machines, and why:
+  - No separate App + Volume + Machine to provision — a Sprite is one unit
+    with its own built-in persistent disk (100GB, fixed size). ensure_workspace()
+    below is a single create_sprite() call plus REPO_ROOT's own `git init`,
+    not a four-step App/Volume/Machine/wait-for-started sequence.
+  - No manual start/stop — Sprites hibernate automatically ~30s after the
+    last request and wake automatically on the next one (100ms-2s), so
+    exec_in_workspace() can call the SDK directly with no wait-for-state
+    polling step the way Machines needed. wake() below still exists (it's
+    the UI's manual "resume before you open a session" action — see
+    routers/workspace.py) — it just no longer has to do very much.
+  - No bootstrap install step — every Sprite ships with git and python3
+    preinstalled, so PHASE2_NOTES.md's old rough edge #2 is moot here.
+  - No image/region/CPU/memory/volume-size settings — see config.py's
+    comment on sprites_api_token for why those are all gone from Settings.
 
-No credential of any kind lives in this module's own request path except the Fly
-API token itself (organization-level infrastructure credential, not a per-project
-or per-user secret) — GitHub tokens are handled entirely by git_sync.py, which
-calls exec_in_workspace() the same as everything else but is the only caller that
-ever passes a credential through to a command it builds (§23.2's table).
+What's a real behavior change, flagged rather than hidden:
+  - sleep() can no longer force a Sprite to stop right now — Sprites expose
+    no manual pause endpoint, only automatic idle hibernation. It's kept as a
+    function (nothing calls it today, but §23.1 anticipated a future idle
+    reaper using it) and now just refreshes billing_state from the Sprite's
+    own reported status instead of commanding a stop.
+  - billing_state is therefore a last-known snapshot, not a live push — it
+    updates whenever ensure_workspace()/wake()/sleep() run, but Sprites has
+    no webhook for "a Sprite just went idle," so a workspace that's been
+    untouched for a while can still show "running" in the DB after it has
+    actually hibernated on Fly's side. Harmless (the next exec just wakes it
+    again transparently) but worth knowing if the UI ever needs a truly live
+    badge — that would mean polling get_sprite() from routers/workspace.py's
+    GET endpoint, not something this module does on its own today.
+
+ROUGH EDGE (flagged the same way PHASE2_NOTES.md flagged the old Machines
+`/exec` response shape — a real gap, not a guess dressed up as fact):
+`sprites-py` shipped its first stable release on 2026-09-17 — days before
+this was written. Three things below are inferred rather than confirmed
+against a source-level signature check, since no live Sprites account or
+outbound network access was available in the environment this was written in
+to actually install the package and inspect it: `sprite.run(..., dir=cwd)`'s
+`dir` kwarg name (inferred from the SDK's REST API using that same
+query-string parameter for exec — https://sprites.dev/api/sprites/exec — and
+from `create_service(..., dir="/app")` using that exact kwarg name in the
+SDK's own README); that `client.sprite(name)` is a plain, non-async handle
+constructor with no I/O (inferred from it being used unawaited everywhere the
+docs show it); and the exception handling below, inferred from the README's
+explicit "subprocess.run style" framing. Run test_workspace_integration.py
+(already updated for Sprites) against your real account before leaning on
+this in production — if `dir=` turns out to be the wrong kwarg name, the fix
+is one line (wrap the argv in `["bash", "-c", f"cd {cwd} && ..."]` instead,
+the same trick this codebase's own git_sync.py/checkpoints.py already use
+elsewhere).
+
+A related, already-fixed gap worth knowing about: `project_workspaces.billing_state`
+has a DB check constraint (db/migrations/0004_projects.sql) limiting it to
+exactly 'running'/'warm'/'cold'. sleep() below maps whatever status string
+the Sprite reports onto one of those three rather than writing it through
+unvalidated — Sprites' own status vocabulary isn't confirmed either, so an
+unrecognized value falls back to 'running' instead of crashing the update.
+
+One thing that IS confirmed, not just inferred: create_sprite() below is
+deliberately called without a `url_settings` argument, and that's safe rather
+than an oversight — Fly's own docs (docs.sprites.dev/reference/configuration)
+state the `auth` default is `"sprite"` (bearer-token-gated), not `"public"`,
+so a freshly created Sprite isn't openly reachable on the internet by
+default. Worth knowing regardless, since this workspace holds a project's
+actual code: don't call update_sprite(..., url_settings=URLSettings(auth="public"))
+anywhere without meaning to.
 """
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-import httpx
+from sprites import AsyncSpritesClient
 
 from app.config import get_settings
 from app.repositories import projects as projects_repo
-from app.services.workspace_paths import REPO_ROOT, VOLUME_MOUNT_PATH, VOLUME_NAME, resolve_repo_path
-
-# Fly app names are a *global* namespace across every Fly customer, not scoped to
-# our org — collision with someone else's app is astronomically unlikely given a
-# uuid4 project_id, but not impossible in principle. If ensure_app() ever starts
-# failing with a name-conflict-shaped error for a *new* project, that's the first
-# thing to check.
-_APP_PREFIX = "qh-ws-"
-
-
-def _app_name(project_id: str) -> str:
-    return f"{_APP_PREFIX}{project_id}"
-
-
-def _sanitize_machine_name(project_id: str) -> str:
-    return f"workspace-{project_id}"[:63]
-
-
-@dataclass
-class ExecResult:
-    exit_code: int
-    stdout: str
-    stderr: str
-    timed_out: bool = False
+from app.services.workspace_paths import REPO_ROOT
 
 
 class WorkspaceProvisionError(RuntimeError):
@@ -69,258 +101,155 @@ class WorkspaceExecError(RuntimeError):
     pass
 
 
-def _headers() -> dict:
+@dataclass
+class ExecResult:
+    exit_code: int
+    stdout: str
+    stderr: str
+    timed_out: bool = False
+
+
+def new_workspace_stub_handle() -> str:
+    """Phase 1's placeholder, written by projects_repo.create_workspace_stub()
+    at project-creation time, before Phase 2 provisions anything real. Kept
+    identical to the Machines-era version — every caller/check that looks for
+    a 'pending-' prefix (routers/projects.py, ensure_workspace() below) still
+    works unchanged."""
+    return f"pending-{uuid.uuid4()}"
+
+
+def _sprite_name(project_id: str) -> str:
+    """Deterministic from project_id, so ensure_workspace() never has to
+    remember a Fly-assigned id the way the Machines version did (a Fly App
+    name was ours to choose; a Machine id wasn't — a Sprite's name is ours to
+    choose, full stop). Truncated the same defensively-conservative way the
+    old Fly App name was, even though Sprites' own name-length limit isn't
+    published anywhere this could confirm it against."""
+    return f"qh-{project_id}"[:63]
+
+
+def _new_client() -> AsyncSpritesClient:
     settings = get_settings()
-    return {"Authorization": f"Bearer {settings.fly_api_token}", "Content-Type": "application/json"}
+    return AsyncSpritesClient(token=settings.sprites_api_token, base_url=settings.sprites_api_base, timeout=30.0)
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-class _FlyClient:
-    """Thin wrapper over the handful of Machines API calls this system needs.
-    Deliberately not a general-purpose Fly SDK — see module docstring."""
-
-    def __init__(self):
-        self._settings = get_settings()
-
-    @property
-    def _base(self) -> str:
-        return self._settings.fly_api_base.rstrip("/")
-
-    async def ensure_app(self, app_name: str) -> None:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            resp = await client.post(
-                f"{self._base}/apps",
-                headers=_headers(),
-                json={"app_name": app_name, "org_slug": self._settings.fly_org_slug},
-            )
-            # Idempotent by design: a 4xx whose body suggests "already exists" is a
-            # success from this caller's point of view — ensure_app() is called on
-            # every ensure_workspace(), not just the first.
-            if resp.status_code >= 400 and "exist" not in resp.text.lower() and "taken" not in resp.text.lower():
-                raise WorkspaceProvisionError(f"Fly app create failed: {resp.status_code} {resp.text}")
-
-    async def create_volume(self, app_name: str, region: str, size_gb: int) -> str:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                f"{self._base}/apps/{app_name}/volumes",
-                headers=_headers(),
-                json={"name": VOLUME_NAME, "region": region, "size_gb": size_gb},
-            )
-            if resp.status_code >= 400:
-                raise WorkspaceProvisionError(f"Fly volume create failed: {resp.status_code} {resp.text}")
-            return resp.json()["id"]
-
-    async def list_volumes(self, app_name: str) -> list[dict]:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            resp = await client.get(f"{self._base}/apps/{app_name}/volumes", headers=_headers())
-            if resp.status_code >= 400:
-                return []
-            return resp.json()
-
-    async def create_machine(self, app_name: str, name: str, region: str, volume_id: str) -> dict:
-        settings = self._settings
-        config = {
-            "image": settings.workspace_image,
-            "guest": {
-                "cpu_kind": settings.workspace_guest_cpu_kind,
-                "cpus": settings.workspace_guest_cpus,
-                "memory_mb": settings.workspace_guest_memory_mb,
-            },
-            "mounts": [{"volume": volume_id, "path": VOLUME_MOUNT_PATH}],
-            # Keeps the machine alive indefinitely once started so exec() has a
-            # process tree to run commands against — the actual work happens via
-            # the exec endpoint below, never via this init command.
-            "init": {"exec": ["/bin/sleep", "infinity"]},
-            "restart": {"policy": "no"},
-            "auto_destroy": False,
-        }
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                f"{self._base}/apps/{app_name}/machines",
-                headers=_headers(),
-                json={"name": name, "region": region, "config": config},
-            )
-            if resp.status_code >= 400:
-                raise WorkspaceProvisionError(f"Fly machine create failed: {resp.status_code} {resp.text}")
-            return resp.json()
-
-    async def get_machine(self, app_name: str, machine_id: str) -> dict | None:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(f"{self._base}/apps/{app_name}/machines/{machine_id}", headers=_headers())
-            if resp.status_code == 404:
-                return None
-            resp.raise_for_status()
-            return resp.json()
-
-    async def start_machine(self, app_name: str, machine_id: str) -> None:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                f"{self._base}/apps/{app_name}/machines/{machine_id}/start", headers=_headers()
-            )
-            if resp.status_code >= 400:
-                raise WorkspaceProvisionError(f"Fly machine start failed: {resp.status_code} {resp.text}")
-
-    async def stop_machine(self, app_name: str, machine_id: str) -> None:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                f"{self._base}/apps/{app_name}/machines/{machine_id}/stop", headers=_headers(), json={}
-            )
-            if resp.status_code >= 400:
-                raise WorkspaceProvisionError(f"Fly machine stop failed: {resp.status_code} {resp.text}")
-
-    async def wait_for_state(self, app_name: str, machine_id: str, state: str, timeout: int = 60) -> None:
-        async with httpx.AsyncClient(timeout=timeout + 10.0) as client:
-            resp = await client.get(
-                f"{self._base}/apps/{app_name}/machines/{machine_id}/wait",
-                headers=_headers(),
-                params={"state": state, "timeout": timeout},
-            )
-            if resp.status_code >= 400:
-                raise WorkspaceProvisionError(
-                    f"Machine did not reach state={state} within {timeout}s: {resp.status_code} {resp.text}"
-                )
-
-    async def exec(self, app_name: str, machine_id: str, argv: list[str], timeout: int) -> ExecResult:
-        async with httpx.AsyncClient(timeout=timeout + 15.0) as client:
-            try:
-                resp = await client.post(
-                    f"{self._base}/apps/{app_name}/machines/{machine_id}/exec",
-                    headers=_headers(),
-                    json={"cmd": argv, "timeout": timeout},
-                )
-            except httpx.TimeoutException:
-                return ExecResult(exit_code=-1, stdout="", stderr="Command timed out.", timed_out=True)
-            if resp.status_code >= 400:
-                raise WorkspaceExecError(f"exec failed: {resp.status_code} {resp.text}")
-            body = resp.json()
-            # Defensive field-name handling — see module docstring's rough-edge note.
-            exit_code = body.get("exit_code", body.get("exitcode", body.get("returncode", 0)))
-            stdout = body.get("stdout", "")
-            stderr = body.get("stderr", "")
-            return ExecResult(exit_code=int(exit_code), stdout=stdout, stderr=stderr)
-
-
-_fly = _FlyClient()
-
-
 async def ensure_workspace(project_id: str) -> dict:
-    """§14.6: 'provisioned once, the first time it's needed... persists across
-    sessions.' Idempotent — safe to call at the start of every operation that
-    needs a live workspace; a project whose Machine already exists just gets
-    looked up and woken if needed, never re-created.
-
-    Returns the project_workspaces row, updated with the real Fly identifiers in
-    place of Phase 1's `pending-*` placeholder handle.
-    """
-    settings = get_settings()
+    """The one entry point that guarantees a project has a real, usable Sprite
+    behind it. Called by wake() and, internally, by exec_in_workspace() itself
+    on every call — cheap once already provisioned (one Supabase read, zero
+    Sprites API calls on the common path, since Sprites don't need an
+    explicit "make sure this is started" call the way Machines did; see the
+    module docstring)."""
     workspace = await projects_repo.get_workspace(project_id)
     if workspace is None:
-        raise WorkspaceProvisionError(f"No project_workspaces row for project {project_id} — was it created?")
+        raise WorkspaceProvisionError(f"No workspace record for project {project_id}.")
+    if not workspace["sprite_handle"].startswith("pending-"):
+        # Already provisioned — the common case on every exec_in_workspace()
+        # call. Still worth a cheap Supabase write (no Sprites API call) to
+        # keep last_active_at meaningful for the UI/any future idle reaper;
+        # if that write volume ever becomes a real cost at scale, this is the
+        # line to throttle or drop first.
+        return await projects_repo.update_workspace(project_id, {"last_active_at": _now_iso()})
 
-    app_name = _app_name(project_id)
+    name = _sprite_name(project_id)
+    async with _new_client() as client:
+        try:
+            sprite = await client.create_sprite(name, labels=["quan-harness"], wait_for_capacity=True)
+        except Exception as exc:  # noqa: BLE001 — see module docstring's ROUGH EDGE note
+            # Idempotency for a retried request whose Sprite got created but
+            # whose DB write then failed: treat a name-conflict-shaped error
+            # as success rather than a hard failure — the same defensive
+            # idiom the Machines-era version used for Fly's own "already
+            # exists" 4xx response.
+            message = str(exc).lower()
+            if not any(token in message for token in ("exist", "taken", "conflict", "409")):
+                raise WorkspaceProvisionError(f"Could not create Sprite {name}: {exc}") from exc
+            sprite = client.sprite(name)
 
-    if workspace["sprite_handle"].startswith("pending-"):
-        await _fly.ensure_app(app_name)
-        volumes = await _fly.list_volumes(app_name)
-        volume_id = volumes[0]["id"] if volumes else await _fly.create_volume(
-            app_name, settings.fly_region, settings.workspace_volume_size_gb
+        init = await sprite.run(
+            "bash",
+            "-c",
+            f"mkdir -p {REPO_ROOT} && git -C {REPO_ROOT} rev-parse --git-dir "
+            f"|| git -C {REPO_ROOT} init -q",
+            capture_output=True,
+            timeout=30,
         )
-        machine = await _fly.create_machine(
-            app_name, _sanitize_machine_name(project_id), settings.fly_region, volume_id
-        )
-        machine_id = machine["id"]
-        await _fly.wait_for_state(app_name, machine_id, "started", timeout=60)
+        if init.returncode != 0:
+            raise WorkspaceProvisionError(
+                f"Could not initialize {REPO_ROOT} on {name}: {init.stderr.decode(errors='replace').strip()}"
+            )
 
-        # workspace_image (config.py) is deliberately a trivial, always-available
-        # base — nothing project-specific baked in. That means git/python3 (both
-        # load-bearing: checkpoints need git, file_tools' writes need python3)
-        # aren't guaranteed present. One-time bootstrap, best-effort: failures
-        # here surface on the *next* real command against this workspace rather
-        # than blocking provisioning, since a already-present toolchain (a
-        # custom image someone points workspace_image at) makes this a fast
-        # no-op, not a hard dependency on apt succeeding.
-        await _fly.exec(
-            app_name,
-            machine_id,
-            [
-                "bash", "-c",
-                "command -v git >/dev/null && command -v python3 >/dev/null || "
-                "(apt-get update -qq && apt-get install -y -qq git python3 python3-pip >/dev/null)",
-            ],
-            timeout=120,
-        )
-        await _fly.exec(app_name, machine_id, ["mkdir", "-p", REPO_ROOT], timeout=30)
-        await _fly.exec(app_name, machine_id, ["git", "init", REPO_ROOT], timeout=30)
-        workspace = await projects_repo.update_workspace(
-            project_id,
-            {
-                "sprite_handle": machine_id,
-                "billing_state": "running",
-                "last_active_at": _now_iso(),
-            },
-        )
-    return workspace
+    return await projects_repo.update_workspace(
+        project_id, {"sprite_handle": name, "billing_state": "running", "last_active_at": _now_iso()}
+    )
 
 
 async def wake(project_id: str) -> dict:
-    """Starts a stopped workspace and waits for it to be ready. A no-op (fast) if
-    already running. Not itself a tool the model can call (§14.6) — this is
-    called internally by exec_in_workspace() whenever a cold workspace is needed."""
+    """A manual 'resume' action for the UI (routers/workspace.py) — forces the
+    wake-from-hibernation to happen now rather than waiting for whatever tool
+    call happens to run first. Sprites wake automatically on any request
+    (including the exec calls below), so this is a convenience, not something
+    exec_in_workspace() itself needs to call first — see the module
+    docstring."""
     workspace = await ensure_workspace(project_id)
-    app_name = _app_name(project_id)
-    machine_id = workspace["sprite_handle"]
-
-    machine = await _fly.get_machine(app_name, machine_id)
-    if machine is not None and machine.get("state") == "started":
-        return workspace
-
-    await projects_repo.update_workspace(project_id, {"billing_state": "warm"})
-    await _fly.start_machine(app_name, machine_id)
-    await _fly.wait_for_state(app_name, machine_id, "started", timeout=60)
+    async with _new_client() as client:
+        await client.sprite(workspace["sprite_handle"]).run("true", capture_output=True, timeout=20)
     return await projects_repo.update_workspace(
         project_id, {"billing_state": "running", "last_active_at": _now_iso()}
     )
 
 
 async def sleep(project_id: str) -> dict:
-    """§23.1: 'The underlying Sprite must be fully off, and unbilled, when nobody's
-    looking at it.' A stopped Machine (not merely suspended) is Fly's actual
-    unbilled-compute state — the persistent Volume (and everything on it) is
-    untouched either way, which is the whole point of the volume/machine split."""
+    """No manual pause endpoint exists on Sprites (see module docstring) — this
+    can no longer command a stop the way it did against Fly Machines. Kept as
+    a function since nothing calls it today but §23.1 anticipated an idle
+    reaper eventually using it; for now it just refreshes billing_state from
+    the Sprite's own reported status rather than pretending to force one."""
     workspace = await projects_repo.get_workspace(project_id)
     if workspace is None or workspace["sprite_handle"].startswith("pending-"):
-        return workspace  # nothing provisioned yet — nothing to stop
-    app_name = _app_name(project_id)
-    await _fly.stop_machine(app_name, workspace["sprite_handle"])
-    return await projects_repo.update_workspace(project_id, {"billing_state": "cold"})
+        return workspace
+    async with _new_client() as client:
+        try:
+            sprite = await client.get_sprite(workspace["sprite_handle"])
+            reported_status = sprite.status
+        except Exception:  # noqa: BLE001 — a failed status check shouldn't crash the caller
+            return workspace
+
+    # project_workspaces.billing_state has a DB check constraint limiting it to
+    # exactly 'running'/'warm'/'cold' (db/migrations/0004_projects.sql) — see
+    # the module docstring's ROUGH EDGE note on why this doesn't write
+    # reported_status through unvalidated.
+    billing_state = reported_status if reported_status in ("running", "warm", "cold") else "running"
+    return await projects_repo.update_workspace(project_id, {"billing_state": billing_state})
 
 
 async def exec_in_workspace(
-    project_id: str, argv: list[str], timeout: int = 120, cwd: str | None = None
+    project_id: str, argv: list[str], timeout: int = 60, cwd: str | None = None
 ) -> ExecResult:
-    """The one primitive every other Phase 2 tool (file_tools, shell_tools,
-    checkpoints, git_sync) is built on. Wakes a cold workspace automatically —
-    from the caller's point of view, a workspace is just always available."""
-    workspace = await wake(project_id)
-    app_name = _app_name(project_id)
-    command = argv if cwd is None else ["sh", "-c", f"cd {_shell_quote(cwd)} && exec \"$0\" \"$@\"", *argv]
-    result = await _fly.exec(app_name, workspace["sprite_handle"], command, timeout=timeout)
-    await projects_repo.update_workspace(project_id, {"last_active_at": _now_iso()})
-    return result
+    """The one primitive file_tools.py/shell_tools.py/checkpoints.py/git_sync.py
+    are all built on. `cwd` defaults to None (Sprites' own default working
+    directory, /home/sprite) rather than REPO_ROOT — callers that need REPO_ROOT
+    pass it explicitly (most already do, via workspace_paths.REPO_ROOT) — same
+    contract as the Machines-era version."""
+    workspace = await ensure_workspace(project_id)
+    async with _new_client() as client:
+        sprite = client.sprite(workspace["sprite_handle"])
+        try:
+            kwargs = {"capture_output": True, "timeout": timeout}
+            if cwd is not None:
+                kwargs["dir"] = cwd
+            result = await sprite.run(*argv, **kwargs)
+        except Exception as exc:  # noqa: BLE001 — see module docstring's ROUGH EDGE note
+            if "timeout" in type(exc).__name__.lower() or "timeout" in str(exc).lower():
+                return ExecResult(exit_code=-1, stdout="", stderr="Command timed out.", timed_out=True)
+            raise WorkspaceExecError(f"exec failed on {workspace['sprite_handle']}: {exc}") from exc
 
-
-def _shell_quote(path: str) -> str:
-    """Minimal POSIX single-quote escaping — used only for the fixed `cd` prefix
-    above, never to build a caller-supplied shell string (execute_bash's own
-    command text is passed to `bash -c` as a single argv element, never
-    concatenated into a larger shell string — see shell_tools.py)."""
-    return "'" + path.replace("'", "'\\''") + "'"
-
-
-def new_workspace_stub_handle() -> str:
-    """Used by projects.py at project-creation time (Phase 1 behavior, unchanged)
-    — a placeholder until ensure_workspace() does the real provisioning above."""
-    return f"pending-{uuid.uuid4().hex[:12]}"
+    return ExecResult(
+        exit_code=result.returncode,
+        stdout=result.stdout.decode(errors="replace"),
+        stderr=result.stderr.decode(errors="replace"),
+    )

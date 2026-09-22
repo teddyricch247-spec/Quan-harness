@@ -19,21 +19,18 @@ class Settings(BaseSettings):
     github_oauth_client_id: str = ""
     github_oauth_client_secret: str = ""
 
-    # --- Fly.io Machines API (§23 — the Workspace Service, Phase 2) ---
-    # A dedicated Fly org for workspaces is strongly recommended (never your
-    # personal org) — see /docs/YOUR_SETUP_CHECKLIST.md §2.
-    fly_api_token: str = ""
-    fly_org_slug: str = ""
-    fly_api_base: str = "https://api.machines.dev/v1"
-    fly_region: str = "iad"
-    # A trivial always-available base image is enough — every workspace clones
-    # or scaffolds real content into it at ensure_workspace() time; nothing
-    # project-specific is baked into the image itself.
-    workspace_image: str = "registry-1.docker.io/library/ubuntu:24.04"
-    workspace_volume_size_gb: int = 5
-    workspace_guest_cpu_kind: str = "shared"
-    workspace_guest_cpus: int = 1
-    workspace_guest_memory_mb: int = 1024
+    # --- Fly.io Sprites (§23 — the Workspace Service, Phase 2) ---
+    # Ported from a Fly Machines integration (see PHASE2_NOTES.md) — Sprites
+    # replace the old App+Volume+Machine trio with one unit that already has
+    # its own persistent disk, so there's no image/volume-size/guest-resources
+    # config left to set: every Sprite gets a fixed 8 vCPUs, autoscaled
+    # memory, and 100GB of storage from the platform itself. A token scopes to
+    # one org on its own (create one at https://sprites.dev/account, or via
+    # `sprite org auth`), so there's no separate org-slug/region setting to
+    # keep in sync the way Machines needed either — see
+    # /docs/YOUR_SETUP_CHECKLIST.md §3.
+    sprites_api_token: str = ""
+    sprites_api_base: str = "https://api.sprites.dev"
 
     frontend_url: str = "http://localhost:3000"
     backend_public_url: str = "http://localhost:8000"

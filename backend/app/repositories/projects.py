@@ -131,9 +131,10 @@ async def get_workspace(project_id: str) -> dict | None:
 
 async def update_workspace(project_id: str, fields: dict) -> dict:
     """Phase 2: workspace_service.py calls this as it provisions/wakes/sleeps the
-    real Fly Machine behind a project — sprite_handle moves from Phase 1's
-    `pending-*` placeholder to a real Fly Machine id here, and billing_state
-    starts reflecting the Machine's actual started/stopped state."""
+    real Fly.io Sprite behind a project — sprite_handle moves from Phase 1's
+    `pending-*` placeholder to a real Sprite name here, and billing_state starts
+    reflecting the Sprite's own reported status (constrained to 'running'/'warm'/
+    'cold' below in the table's own check constraint — see 0004_projects.sql)."""
     client = get_service_client()
 
     def _call():

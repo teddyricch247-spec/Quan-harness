@@ -4,6 +4,9 @@ pydantic==2.10.3
 pydantic-settings==2.7.0
 supabase==2.10.0
 httpx==0.27.2
+sprites-py==0.7.1  # Fly.io Sprites SDK — the Workspace Service (§23,
+  # app/services/workspace_service.py). Pinned to the latest release on PyPI
+  # as of this writing (2026-09-17); confirm it still resolves before deploying.
 PyJWT[crypto]==2.10.1
 python-dotenv==1.0.1
 python-multipart==0.0.20
