@@ -42,11 +42,11 @@ DESIGN DECISIONS NOT SPELLED OUT VERBATIM IN THE SPEC EXCERPT (see
     (message_builder.py's grouping tolerates this — see its own docstring).
     This is so a live SSE viewer sees each result as soon as it's ready
     rather than a long silent gap while a whole batch executes.
-  - A call after an Ask-gated one in the same response is never recorded at
-    all (no tool_call event), not recorded-then-abandoned — §16.2 says these
-    are "discarded, not queued," and never persisting them avoids a
-    permanently-dangling event future crash-recovery scans would otherwise
-    keep tripping over.
+  - A call after an Ask-gated one in the same model response is never
+    recorded at all (no tool_call event), not recorded-then-abandoned —
+    §16.2 says these are "discarded, not queued," and never persisting them
+    avoids a permanently-dangling event future crash-recovery scans would
+    otherwise keep tripping over.
   - `is_read_only` on a bash/native call is a fixed per-tool-name property
     (tool_partition.py); nothing here inspects execute_bash's command text to
     guess read-only-ness, matching §16.2's own explicit reasoning.
@@ -418,11 +418,89 @@ def _safe_int(value, default: int) -> int:
         return default
 
 
+async def _refresh_oauth_token(tool: tool_schemas.MergedMcpTool) -> str | None:
+    """Phase 4.3 — best-effort silent refresh for an oauth-mode connector
+    tool whose call just failed with 401 (closes the gap /docs/PHASE3_NOTES.md
+    flagged: "mcp_oauth.py has exchange_code but no refresh-token exchange
+    function"). Returns the new access token on success, or None on any
+    failure (no session on file, malformed session data, a revoked/expired
+    refresh token, a network error) — every failure mode degrades to None
+    rather than raising, so the caller (`_execute_mcp` below) always has a
+    clean fallback: surface the original 401 with a clearer message, exactly
+    like any other connector-call failure. Never touches the mcp_servers row
+    itself — only the Vault *values* the row's auth_token_ref/
+    oauth_session_ref already point at change, the same "rotate in place"
+    pattern llm_credentials.py's own rotate already uses, so no caller
+    holding a stale MergedMcpTool (built once per turn-loop iteration in
+    `_fetch_merged_tool_schema`) needs to be told a ref changed — it hasn't."""
+    import json
+
+    from app.services import mcp_oauth, vault
+
+    if not tool.oauth_session_ref:
+        return None
+    raw = await vault.read_secret(tool.oauth_session_ref)
+    if not raw:
+        return None
+    try:
+        session = json.loads(raw)
+        refresh_token = session["refresh_token"]
+        token_endpoint = session["token_endpoint"]
+        client_id = session["client_id"]
+    except (TypeError, ValueError, KeyError):
+        return None
+
+    client_secret = await vault.read_secret(tool.oauth_client_secret_ref) if tool.oauth_client_secret_ref else None
+
+    try:
+        token_response = await mcp_oauth.refresh_access_token(token_endpoint, client_id, refresh_token, client_secret)
+    except Exception:  # noqa: BLE001 — a failed refresh degrades to the original 401, never raises into the turn loop
+        return None
+
+    new_access_token = token_response.get("access_token")
+    if not new_access_token:
+        return None
+    if tool.auth_token_ref:
+        await vault.update_secret(tool.auth_token_ref, new_access_token)
+
+    # Some authorization servers rotate the refresh token on every use, some
+    # don't — only overwrite the stored session if a new one actually came
+    # back, rather than assuming either behavior.
+    new_refresh_token = token_response.get("refresh_token")
+    if new_refresh_token:
+        session["refresh_token"] = new_refresh_token
+        await vault.update_secret(tool.oauth_session_ref, json.dumps(session))
+
+    return new_access_token
+
+
 async def _execute_mcp(tool: tool_schemas.MergedMcpTool, arguments: dict) -> ExecutionOutcome:
+    """Phase 4.3: on a 401 from an oauth-mode tool with a refresh session on
+    file (tool_schemas.should_attempt_oauth_refresh), attempts exactly one
+    silent refresh-and-retry before giving up — closes the gap
+    mcp_tools.call_tool's own docstring names (it makes exactly one attempt
+    and never refreshes on its own). A refresh that fails, or that isn't
+    even attempted (a static_token/none-mode tool, or an oauth tool with no
+    refresh_token on file), falls back to the original failed result with a
+    clearer message pointing at reconnecting the connector — never raises,
+    matching every other connector-call failure mode in this module."""
     from app.services import vault
 
     auth_token = await vault.read_secret(tool.auth_token_ref) if tool.auth_token_ref else None
     result = await mcp_tools.call_tool(tool, arguments, auth_token)
+
+    if tool_schemas.should_attempt_oauth_refresh(tool, result.status_code):
+        refreshed_token = await _refresh_oauth_token(tool)
+        if refreshed_token is not None:
+            result = await mcp_tools.call_tool(tool, arguments, refreshed_token)
+        elif not result.ok:
+            result = mcp_tools.McpCallResult(
+                ok=False,
+                error=(result.error or "Unauthorized")
+                + " — this connector's access token expired and could not be refreshed "
+                "automatically; reconnect it from Connections \u2192 Connectors.",
+            )
+
     return ExecutionOutcome(ok=result.ok, content=result.content, error=result.error or "")
 
 

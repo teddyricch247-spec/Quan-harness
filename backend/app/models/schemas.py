@@ -103,6 +103,14 @@ class McpServerCreate(BaseModel):
     url: str
     auth_mode: McpAuthMode = "none"
     static_token: str | None = None  # required when auth_mode == "static_token"
+    # Phase 4.3: a pre-registered OAuth client, for an authorization server that
+    # doesn't implement RFC 7591 dynamic client registration — GitHub's own
+    # remote MCP server (api.githubcopilot.com/mcp) is the concrete, confirmed
+    # example this was added for (see mcp_oauth.py's module docstring and
+    # 0008_connector_oauth_client.sql). Only meaningful when auth_mode ==
+    # "oauth"; oauth_start prefers this over attempting DCR whenever it's set.
+    oauth_client_id: str | None = None
+    oauth_client_secret: str | None = None  # write-only; only valid alongside oauth_client_id
     default_permission_state: PermissionState = "ask"
 
 
@@ -114,6 +122,7 @@ class McpServerOut(BaseModel):
     enabled: bool
     default_permission_state: str
     discovered_tools: list[dict]
+    oauth_client_id: str | None  # not secret — a client_id is a public identifier, safe to display
     last_handshake_at: datetime | None
     last_handshake_error: str | None
     created_at: datetime
@@ -168,6 +177,16 @@ class ProjectOut(BaseModel):
     workspace_billing_state: str | None
     harness_branch_ready: bool
     created_at: datetime
+    # Phase 4.4: set only on the POST /projects response for mode == "import",
+    # and only when the automatic first Pull (see routers/projects.py's
+    # create_project) failed — e.g. the workspace couldn't be provisioned yet
+    # because Sprites/Fly credentials aren't configured. None everywhere else
+    # (every other endpoint returning ProjectOut has nothing to report here).
+    # A non-null value here never means project creation itself failed — the
+    # project, its GitHub link, and its credential selection are all real;
+    # only the initial pull needs retrying, from the Workspace panel's own
+    # Pull button.
+    import_pull_error: str | None = None
 
 
 class ProjectConnectorsAccessUpdate(BaseModel):

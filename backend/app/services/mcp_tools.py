@@ -23,14 +23,27 @@ class McpCallResult:
     ok: bool
     content: str = ""
     error: str | None = None
+    # Phase 4.3: the raw HTTP status code behind a failure, when the failure
+    # came from an HTTP response at all (a timeout or a connection error has
+    # none — those stay None). This module still makes exactly one call and
+    # never retries on its own (see call_tool's own docstring) — status_code
+    # exists so a caller that DOES want to react to a specific code (agent_
+    # loop.py's `_execute_mcp`, deciding whether a 401 is worth a silent
+    # OAuth refresh-and-retry) can, without this module needing to know
+    # anything about OAuth, Vault, or refresh tokens itself.
+    status_code: int | None = None
 
 
 async def call_tool(tool: MergedMcpTool, arguments: dict, auth_token: str | None) -> McpCallResult:
-    """No OAuth refresh-on-expiry handling — a 401 from an expired oauth
+    """Exactly one attempt, no retry, no refresh — a 401 from an expired oauth
     access token surfaces as a plain failed result the model sees and reports,
-    same as any other tool failure, rather than being retried after a silent
-    refresh. mcp_oauth.py has no refresh-exchange function yet (see
-    /docs/PHASE3_NOTES.md) — flagged there as a real gap, not hidden here."""
+    same as any other tool failure, unless the caller notices `status_code ==
+    401` and chooses to refresh and call this again itself (see
+    agent_loop.py's `_execute_mcp`/`_refresh_oauth_token`, and
+    tool_schemas.should_attempt_oauth_refresh for the shared decision of when
+    that's worth trying). Kept that way deliberately: this module stays a
+    plain, stateless transport layer with no Vault/OAuth-state access of its
+    own, the same separation mcp_handshake.py already keeps."""
     headers = _headers(tool.auth_mode, auth_token)
     try:
         async with httpx.AsyncClient(timeout=CALL_TIMEOUT_SECONDS + 15.0) as client:
@@ -86,7 +99,11 @@ async def call_tool(tool: MergedMcpTool, arguments: dict, auth_token: str | None
     except httpx.TimeoutException:
         return McpCallResult(ok=False, error="Connector call timed out.")
     except httpx.HTTPStatusError as exc:
-        return McpCallResult(ok=False, error=f"HTTP {exc.response.status_code} from connector")
+        return McpCallResult(
+            ok=False,
+            error=f"HTTP {exc.response.status_code} from connector",
+            status_code=exc.response.status_code,
+        )
     except httpx.RequestError as exc:
         return McpCallResult(ok=False, error=f"Could not reach connector: {exc}")
     except Exception as exc:  # noqa: BLE001 — surfaced to the model as a normal tool failure, not raised

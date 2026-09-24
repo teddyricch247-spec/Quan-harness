@@ -36,6 +36,11 @@ export interface McpServer {
   enabled: boolean;
   default_permission_state: "on" | "off" | "ask";
   discovered_tools: McpTool[];
+  // Phase 4.3 — a pre-registered OAuth client id, for a server whose
+  // authorization server doesn't support dynamic client registration (e.g.
+  // GitHub's own remote MCP server). Not secret — safe to display as-is.
+  // Null for a connector using DCR, or one in static_token/none mode.
+  oauth_client_id: string | null;
   last_handshake_at: string | null;
   last_handshake_error: string | null;
   created_at: string;
@@ -53,6 +58,10 @@ export interface Project {
   workspace_billing_state: "running" | "warm" | "cold" | null;
   harness_branch_ready: boolean;
   created_at: string;
+  // Phase 4.4 — set only on the POST /projects response for mode == "import",
+  // and only when the automatic first Pull failed. Undefined/null everywhere
+  // else. A non-null value never means project creation itself failed.
+  import_pull_error?: string | null;
 }
 
 export interface Session {

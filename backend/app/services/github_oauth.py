@@ -70,6 +70,28 @@ async def fetch_authenticated_login(token: str) -> str:
         return resp.json()["login"]
 
 
+async def get_repository(token: str, full_name: str) -> dict:
+    """Phase 4.4: used by the New Project flow's 'import an existing
+    repository' path (§12) to resolve the repository's real default branch
+    at project-creation time, rather than assuming "main". A real, common
+    mismatch — a repo whose default branch is "master", "develop", or
+    anything else GitHub didn't invent for it — and this project's very
+    first Pull (git_sync.pull, once harness_branch_ready is still False)
+    fetches this exact branch name from the remote, so a wrong guess here
+    made that first Pull fail outright with "couldn't find remote ref",
+    before the workspace ever had real content in it. A plain REST call,
+    same shape as create_repository below."""
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.get(
+            f"{GITHUB_API_URL}/repos/{full_name}",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+        )
+        if resp.status_code >= 400:
+            raise ValueError(f"GitHub repository lookup failed: {resp.status_code} {resp.text}")
+        data = resp.json()
+        return {"full_name": data["full_name"], "default_branch": data.get("default_branch", "main")}
+
+
 async def create_repository(token: str, name: str, private: bool = True) -> dict:
     """Used by the New Project flow's 'create a new repository right now' path (§12)
     and by git_sync.push()'s 'if the workspace has no linked repo yet, Push first

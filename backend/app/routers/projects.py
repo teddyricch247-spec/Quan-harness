@@ -23,12 +23,12 @@ from app.repositories import (
     project_memory as project_memory_repo,
     projects as repo,
 )
-from app.services import github_oauth, vault, workspace_service
+from app.services import git_sync, github_oauth, vault, workspace_service
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
 
-async def _to_out(row: dict) -> ProjectOut:
+async def _to_out(row: dict, import_pull_error: str | None = None) -> ProjectOut:
     workspace = await repo.get_workspace(row["id"])
     return ProjectOut(
         id=row["id"],
@@ -42,6 +42,7 @@ async def _to_out(row: dict) -> ProjectOut:
         workspace_billing_state=workspace["billing_state"] if workspace else None,
         harness_branch_ready=row.get("harness_branch_ready", False),
         created_at=row["created_at"],
+        import_pull_error=import_pull_error,
     )
 
 
@@ -66,9 +67,16 @@ async def create_project(body: ProjectCreate, user: AuthedUser = Depends(verifie
 
     - 'scratch' (default, highlighted path): no repository, no GitHub credential
       required at all. Nothing is created on GitHub.
-    - 'import': links an existing repository by name. The actual one-time clone
-      into the persistent workspace is Workspace Service work (Phase 2) — this
-      records the link so it's ready for that step.
+    - 'import': links an existing repository by name, looks up its *real*
+      default branch from the GitHub API (Phase 4.3/4.4 — previously hardcoded
+      to "main", a real, common mismatch for a repo whose default branch is
+      "master", "develop", or anything else GitHub didn't invent for it — see
+      github_oauth.get_repository's own docstring), and immediately pulls its
+      content into the freshly-provisioned workspace so the project isn't left
+      silently empty until the person happens to click Pull themselves. Phase
+      1/2's original comment here said the clone was deferred until "the
+      Workspace Service exists" — it does now (Phase 2), so this mode actually
+      does what "Import an existing repository" says on the tin.
     - 'create_new_repo': calls the GitHub API to create a brand-new repository
       right now, using the selected github_credential_id. This *is* in scope for
       Phase 1 — it's a plain REST call, no workspace/clone involved.
@@ -84,6 +92,7 @@ async def create_project(body: ProjectCreate, user: AuthedUser = Depends(verifie
             detail="github_credential_id and new_repo_name are required when mode is 'create_new_repo'.",
         )
 
+    cred = None
     if body.github_credential_id is not None:
         cred = await github_repo.get_for_user(user.user_id, body.github_credential_id)
         if cred is None:
@@ -99,16 +108,24 @@ async def create_project(body: ProjectCreate, user: AuthedUser = Depends(verifie
 
     github_repo_full_name = None
     github_default_branch = None
+    github_token = None
+    if cred is not None and cred.get("token_ref"):
+        github_token = await vault.read_secret(cred["token_ref"])
 
     if body.mode == "import":
-        github_repo_full_name = body.github_repo
-        github_default_branch = "main"  # confirmed/corrected once the Workspace Service (Phase 2) clones it
-    elif body.mode == "create_new_repo":
-        token = await vault.read_secret(cred["token_ref"]) if cred.get("token_ref") else None
-        if not token:
+        if not github_token:
             raise HTTPException(status_code=400, detail="Selected GitHub credential has no usable token.")
         try:
-            created = await github_oauth.create_repository(token, body.new_repo_name, body.new_repo_private)
+            info = await github_oauth.get_repository(github_token, body.github_repo)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"Could not look up repository {body.github_repo}: {exc}")
+        github_repo_full_name = info["full_name"]
+        github_default_branch = info["default_branch"]
+    elif body.mode == "create_new_repo":
+        if not github_token:
+            raise HTTPException(status_code=400, detail="Selected GitHub credential has no usable token.")
+        try:
+            created = await github_oauth.create_repository(github_token, body.new_repo_name, body.new_repo_private)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=502, detail=f"GitHub repo creation failed: {exc}")
         github_repo_full_name = created["full_name"]
@@ -126,17 +143,48 @@ async def create_project(body: ProjectCreate, user: AuthedUser = Depends(verifie
     )
 
     # Phase 1 created only a placeholder row here; Phase 2's workspace_service.py
-    # does the real Fly provisioning, lazily, the first time anything actually
-    # needs the workspace (§14.6 — not something project creation itself blocks
-    # on, so signup-to-first-project stays fast). See /docs/PHASE2_NOTES.md.
+    # does the real Fly/Sprites provisioning, lazily, the first time anything
+    # actually needs the workspace (§14.6 — not something project creation
+    # itself normally blocks on, so signup-to-first-project stays fast for the
+    # 'scratch' and 'create_new_repo' modes). See /docs/PHASE2_NOTES.md.
     await repo.create_workspace_stub(row["id"], sprite_handle=workspace_service.new_workspace_stub_handle())
 
     await repo.grant_connector_access(row["id"], body.connector_ids)
 
-    await audit.record(
-        user.user_id, "project", "create", True, project_id=row["id"], output_summary=f"mode={body.mode}"
-    )
-    return await _to_out(row)
+    # Phase 4.4: 'import' mode is the one case where the workspace needs real
+    # content in it immediately, not lazily on first agent tool call — an
+    # agent working in a blank git-init'd workspace with no relation to the
+    # actual imported repository would be a silent, confusing bug, not a
+    # deferred nicety. git_sync.pull() is the exact mechanism Phase 2 already
+    # built for "make the workspace match GitHub" — reused as-is rather than
+    # duplicated. confirm_discard=True is safe here specifically because the
+    # workspace is provably brand new (create_workspace_stub/ensure_workspace
+    # just ran a bare `git init`, zero commits) — there is nothing local to
+    # discard.
+    #
+    # A failure here (most likely: Sprites/Fly credentials aren't configured
+    # yet, per AGENTS.md's "the app works without them; only the sandboxed
+    # workspace feature is unavailable until they're filled in") must NOT
+    # fail project creation — the project row, its GitHub link (with the now-
+    # correct default branch above), and its credential selection are all
+    # real and useful on their own. The failure is surfaced on the response
+    # instead, so the person knows to retry from the Workspace panel's own
+    # Pull button once workspace credentials exist, rather than being left
+    # with a silently-empty workspace and no explanation.
+    import_pull_error: str | None = None
+    if body.mode == "import":
+        try:
+            await git_sync.pull(user.user_id, row["id"], confirm_discard=True)
+        except git_sync.GitSyncError as exc:
+            import_pull_error = str(exc)
+        except Exception as exc:  # noqa: BLE001 — workspace provisioning failing must not fail project creation
+            import_pull_error = f"Could not provision the workspace to pull into: {exc}"
+
+    summary = f"mode={body.mode}"
+    if import_pull_error:
+        summary += " (initial pull failed — see import_pull_error)"
+    await audit.record(user.user_id, "project", "create", True, project_id=row["id"], output_summary=summary)
+    return await _to_out(row, import_pull_error=import_pull_error)
 
 
 @router.patch("/{project_id}", response_model=ProjectOut)

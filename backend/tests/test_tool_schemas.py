@@ -3,19 +3,21 @@ from app.services.tool_schemas import (
     build_full_tool_list,
     merge_mcp_tools,
     resolve_permission_state,
+    should_attempt_oauth_refresh,
 )
 
 
-def _server(id_, name, default_state="ask", tools=None, enabled=True):
+def _server(id_, name, default_state="ask", tools=None, enabled=True, auth_mode="static_token", **extra):
     return {
         "id": id_,
         "name": name,
         "url": f"https://{name}.example.com/mcp",
-        "auth_mode": "static_token",
+        "auth_mode": auth_mode,
         "auth_token_ref": f"ref-{id_}",
         "default_permission_state": default_state,
         "enabled": enabled,
         "discovered_tools": tools or [],
+        **extra,
     }
 
 
@@ -121,3 +123,69 @@ def test_empty_grants_yields_native_only():
     merged = merge_mcp_tools([], {})
     full = build_full_tool_list(merged)
     assert len(full) == len(NATIVE_TOOL_NAMES)
+
+
+# --- Phase 4.3: oauth_session_ref / oauth_client_secret_ref threading, and
+# should_attempt_oauth_refresh's own decision logic. ---------------------
+
+
+def test_oauth_refs_default_to_none_for_a_server_dict_without_them():
+    # every existing server dict in this file (static_token mode) has neither
+    # key at all — merge_mcp_tools must not raise, and both fields default to
+    # None rather than requiring every caller to start passing them.
+    server = _server("s1", "X", tools=[{"name": "a", "description": "", "input_schema": {}}])
+    merged = merge_mcp_tools([server], {})
+    entry = merged.mcp_tools[0]
+    assert entry.oauth_session_ref is None
+    assert entry.oauth_client_secret_ref is None
+
+
+def test_oauth_refs_are_carried_through_when_present():
+    server = _server(
+        "s1",
+        "GitHub",
+        auth_mode="oauth",
+        tools=[{"name": "list_issues", "description": "", "input_schema": {}}],
+        oauth_session_ref="vault-session-ref",
+        oauth_client_secret_ref="vault-client-secret-ref",
+    )
+    merged = merge_mcp_tools([server], {})
+    entry = merged.mcp_tools[0]
+    assert entry.auth_mode == "oauth"
+    assert entry.oauth_session_ref == "vault-session-ref"
+    assert entry.oauth_client_secret_ref == "vault-client-secret-ref"
+
+
+def test_should_attempt_oauth_refresh_true_only_for_401_oauth_with_session():
+    server = _server(
+        "s1", "GitHub", auth_mode="oauth", tools=[{"name": "a"}], oauth_session_ref="vault-session-ref"
+    )
+    tool = merge_mcp_tools([server], {}).mcp_tools[0]
+    assert should_attempt_oauth_refresh(tool, 401) is True
+
+
+def test_should_attempt_oauth_refresh_false_for_non_401():
+    server = _server(
+        "s1", "GitHub", auth_mode="oauth", tools=[{"name": "a"}], oauth_session_ref="vault-session-ref"
+    )
+    tool = merge_mcp_tools([server], {}).mcp_tools[0]
+    assert should_attempt_oauth_refresh(tool, 403) is False
+    assert should_attempt_oauth_refresh(tool, 500) is False
+    assert should_attempt_oauth_refresh(tool, None) is False
+
+
+def test_should_attempt_oauth_refresh_false_for_static_token_mode():
+    # a 401 from a static-token tool means the token itself is wrong/revoked,
+    # not expired — nothing to refresh, so this must stay False even though
+    # the status code matches.
+    server = _server("s1", "X", auth_mode="static_token", tools=[{"name": "a"}])
+    tool = merge_mcp_tools([server], {}).mcp_tools[0]
+    assert should_attempt_oauth_refresh(tool, 401) is False
+
+
+def test_should_attempt_oauth_refresh_false_when_oauth_but_no_session_on_file():
+    # an oauth-mode server whose authorization server never issued a
+    # refresh_token (some don't) has nothing to refresh with either.
+    server = _server("s1", "X", auth_mode="oauth", tools=[{"name": "a"}])  # no oauth_session_ref
+    tool = merge_mcp_tools([server], {}).mcp_tools[0]
+    assert should_attempt_oauth_refresh(tool, 401) is False

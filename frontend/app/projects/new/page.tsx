@@ -67,7 +67,18 @@ function NewProjectWizard() {
           connector_ids: connectorIds,
         }),
       });
-      router.replace(`/projects/${project.id}`);
+      // Phase 4.4: 'import' mode pulls the real repository into the workspace
+      // immediately (see routers/projects.py's create_project) — if that
+      // pull failed (most commonly: workspace credentials aren't configured
+      // yet), the project itself is still real and usable, so this still
+      // navigates there rather than treating it as a creation failure. The
+      // reason is passed through as a query param so the project page can
+      // show it once and point at the Pull button to retry.
+      if (project.import_pull_error) {
+        router.replace(`/projects/${project.id}?import_warning=${encodeURIComponent(project.import_pull_error)}`);
+      } else {
+        router.replace(`/projects/${project.id}`);
+      }
     } catch (e) {
       setError((e as ApiError).message);
       setBusy(false);
@@ -116,7 +127,14 @@ function NewProjectWizard() {
                   onChange={() => setMode("import")}
                   className="mt-0.5"
                 />
-                <span className="font-medium">Import an existing repository</span>
+                <span>
+                  <span className="font-medium">Import an existing repository</span>
+                  <br />
+                  <span className="text-muted">
+                    Looks up its real default branch and pulls its current content into the
+                    workspace right away.
+                  </span>
+                </span>
               </label>
               {mode === "import" && (
                 <div className="pl-6 space-y-2">

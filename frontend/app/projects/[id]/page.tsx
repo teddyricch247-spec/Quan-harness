@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useSearchParams } from "next/navigation";
 import NavBar from "@/components/NavBar";
 import AuthGuard from "@/components/AuthGuard";
 import ErrorBanner from "@/components/ErrorBanner";
@@ -13,8 +13,18 @@ import { Project } from "@/lib/types";
 
 function ProjectWorkspace() {
   const params = useParams<{ id: string }>();
+  const searchParams = useSearchParams();
   const [project, setProject] = useState<Project | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Phase 4.4: a one-time notice from the New Project wizard when the
+  // 'import' mode's automatic first Pull failed (see routers/projects.py's
+  // create_project and app/projects/new/page.tsx's execute()) — the project
+  // itself is real either way, this just says the workspace still needs a
+  // manual Pull below. Dismissible; not re-fetched from the project itself,
+  // since GET /projects/{id} never carries this field (see ProjectOut's own
+  // comment) — it only ever arrives once, via the redirect that brought the
+  // person here.
+  const [importWarning, setImportWarning] = useState<string | null>(searchParams.get("import_warning"));
 
   useEffect(() => {
     apiFetch<Project>(`/projects/${params.id}`)
@@ -34,6 +44,19 @@ function ProjectWorkspace() {
         </Link>
       </div>
       <p className="text-sm text-muted mono mb-6">{project.github_repo ?? "not linked yet"}</p>
+
+      {importWarning && (
+        <div className="border border-amber-400 bg-amber-50 rounded p-3 mb-4 text-sm">
+          <p className="mb-2">
+            The repository was imported and linked, but pulling its content into the workspace
+            failed: <span className="mono">{importWarning}</span> Use the Pull button in
+            Workspace &amp; sync below to try again once that's resolved.
+          </p>
+          <button className="btn-default text-xs" onClick={() => setImportWarning(null)}>
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {/* §11.2's two-pane Workspace layout, stood up now per the implementation order's
           "mobile single-column collapse behavior, from the start" — even though neither
@@ -92,7 +115,9 @@ export default function ProjectPage() {
     <AuthGuard>
       <NavBar />
       <main className="max-w-5xl mx-auto px-4 py-6">
-        <ProjectWorkspace />
+        <Suspense fallback={<p className="text-sm text-muted">Loading…</p>}>
+          <ProjectWorkspace />
+        </Suspense>
       </main>
     </AuthGuard>
   );

@@ -1,0 +1,29 @@
+-- 0008_connector_oauth_client.sql
+-- Quan Harness — Phase 4.3 — §9's OAuth connection path, closing a real gap
+-- found while exercising it against a concrete real-world connector (GitHub's
+-- own remote MCP server, api.githubcopilot.com/mcp — §9's own explicit
+-- "connect GitHub-as-connector ... the first real-world connector exercised
+-- end to end" instruction).
+--
+-- app/services/mcp_oauth.py's OAuth flow only ever attempts RFC 7591 dynamic
+-- client registration (DCR) — the MCP authorization spec's intended default,
+-- so a person never has to pre-register anything for a well-behaved server.
+-- GitHub's own authorization server (github.com) is a confirmed, documented
+-- counterexample: it advertises no registration_endpoint at all, so DCR
+-- fails immediately for every client that tries it (see
+-- github/copilot-cli#4604 and github/github-mcp-server#1404 for two
+-- independent, current reports of exactly this failure against GitHub's real
+-- server). The only way to connect a server like this via real OAuth (as
+-- opposed to falling back to a personal access token in static_token mode)
+-- is a pre-registered OAuth App/client — client_id, and a client_secret for
+-- a confidential client, both supplied by the person rather than obtained
+-- through DCR.
+--
+-- oauth_client_id is plain text, not a Vault ref — a client_id is a public
+-- identifier (the same way a GitHub OAuth App's Client ID is shown openly on
+-- its settings page), not a secret. oauth_client_secret_ref is a Vault ref,
+-- matching every other credential-shaped value in this table
+-- (auth_token_ref, oauth_session_ref) — a confidential client's secret is
+-- exactly the kind of value §13 says never gets a plaintext column.
+alter table mcp_servers add column oauth_client_id text;
+alter table mcp_servers add column oauth_client_secret_ref text;

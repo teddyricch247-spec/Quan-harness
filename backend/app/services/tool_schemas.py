@@ -157,6 +157,14 @@ class MergedMcpTool:
     url: str
     auth_mode: str
     auth_token_ref: str | None
+    # Phase 4.3: carried through so agent_loop.py's `_execute_mcp` can attempt
+    # a silent refresh-and-retry on a 401 without a second DB round trip back
+    # to mcp_servers for the same row it already fetched to build this merge.
+    # Both default to None so every existing caller/test that builds a server
+    # dict without these keys (a static_token/none-mode connector has neither)
+    # is unaffected — see merge_mcp_tools' own .get() calls below.
+    oauth_session_ref: str | None = None  # Vault ref: {"refresh_token", "client_id", "token_endpoint"}
+    oauth_client_secret_ref: str | None = None  # Vault ref, only set for a pre-registered confidential client
 
 
 @dataclass
@@ -185,6 +193,23 @@ def resolve_permission_state(tool_name: str, default_permission_state: str, over
     `mcp_tool_overrides.permission_state` if set for this tool, else the
     server's own default_permission_state."""
     return overrides.get(tool_name) or default_permission_state
+
+
+def should_attempt_oauth_refresh(tool: MergedMcpTool, status_code: int | None) -> bool:
+    """Phase 4.3 — the shared decision of whether a failed connector-tool call
+    is worth a silent OAuth refresh-and-retry (agent_loop.py's `_execute_mcp`
+    is the only caller). A 401 is only actually recoverable this way when the
+    tool is oauth-mode *and* there's a stored refresh session to retry with:
+    a static_token/none-mode tool has nothing to refresh (a 401 from one of
+    those means the token itself is simply wrong or revoked, not expired),
+    and an oauth-mode tool whose authorization server never issued a
+    refresh_token in the first place (some don't) has nothing to refresh
+    with either — both cases should surface the failure as-is, not spend a
+    round trip attempting a refresh that can't succeed. Any other status
+    code (403 permission-denied, 500, a timeout that never reached
+    mcp_tools.McpCallResult.status_code at all) is a real failure a token
+    refresh can't fix, so this only ever returns True for exactly 401."""
+    return status_code == 401 and tool.auth_mode == "oauth" and bool(tool.oauth_session_ref)
 
 
 def merge_mcp_tools(
@@ -234,6 +259,8 @@ def merge_mcp_tools(
                     url=server["url"],
                     auth_mode=server["auth_mode"],
                     auth_token_ref=server.get("auth_token_ref"),
+                    oauth_session_ref=server.get("oauth_session_ref"),
+                    oauth_client_secret_ref=server.get("oauth_client_secret_ref"),
                 )
             )
     return MergedToolSchema(mcp_tools=merged)

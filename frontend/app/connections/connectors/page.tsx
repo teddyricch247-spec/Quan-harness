@@ -11,6 +11,20 @@ import { McpServer } from "@/lib/types";
 type AuthMode = "none" | "static_token" | "oauth";
 type Permission = "on" | "off" | "ask";
 
+// Phase 4.3 — §9's "connect GitHub-as-connector ... the first real-world
+// connector exercised end to end." GitHub's own remote MCP server, confirmed
+// (github/copilot-cli#4604, github/github-mcp-server#1404) to support neither
+// anonymous access nor RFC 7591 dynamic client registration — a personal
+// access token via 'static token' mode is the reliable way to connect it
+// without first registering a GitHub OAuth App of your own. The quick-connect
+// button below just pre-fills the form with this; it doesn't call anything
+// GitHub-specific on the backend, which treats this the same as any other
+// connector.
+const GITHUB_MCP_PRESET = {
+  name: "GitHub",
+  url: "https://api.githubcopilot.com/mcp/",
+};
+
 function ToolRow({
   connectorId,
   name,
@@ -84,6 +98,9 @@ function ConnectorCard({ connector, onChange }: { connector: McpServer; onChange
             {connector.name} {!connector.enabled && <span className="text-xs text-accent ml-1">draft — not active</span>}
           </p>
           <p className="text-xs text-muted mono">{connector.url}</p>
+          {connector.oauth_client_id && (
+            <p className="text-xs text-muted mono">pre-registered client: {connector.oauth_client_id}</p>
+          )}
         </div>
         <div className="flex gap-2">
           {connector.auth_mode === "oauth" && !connector.discovered_tools.length && !connector.last_handshake_error && (
@@ -136,6 +153,8 @@ function ConnectorsManager() {
   const [url, setUrl] = useState("");
   const [authMode, setAuthMode] = useState<AuthMode>("none");
   const [staticToken, setStaticToken] = useState("");
+  const [oauthClientId, setOauthClientId] = useState("");
+  const [oauthClientSecret, setOauthClientSecret] = useState("");
   const [busy, setBusy] = useState(false);
 
   function load() {
@@ -150,6 +169,20 @@ function ConnectorsManager() {
     if (err) setError(err);
   }, [searchParams]);
 
+  function quickConnectGithub() {
+    setName(GITHUB_MCP_PRESET.name);
+    setUrl(GITHUB_MCP_PRESET.url);
+    // static_token (a GitHub personal access token) is the reliable default —
+    // see GITHUB_MCP_PRESET's own comment. OAuth is still available below by
+    // switching auth mode and supplying a pre-registered GitHub OAuth App's
+    // Client ID/Secret, for anyone who already has one.
+    setAuthMode("static_token");
+    setStaticToken("");
+    setOauthClientId("");
+    setOauthClientSecret("");
+    setShowForm(true);
+  }
+
   async function create() {
     setBusy(true);
     setError(null);
@@ -161,11 +194,15 @@ function ConnectorsManager() {
           url,
           auth_mode: authMode,
           static_token: authMode === "static_token" ? staticToken : undefined,
+          oauth_client_id: authMode === "oauth" && oauthClientId ? oauthClientId : undefined,
+          oauth_client_secret: authMode === "oauth" && oauthClientSecret ? oauthClientSecret : undefined,
         }),
       });
       setName("");
       setUrl("");
       setStaticToken("");
+      setOauthClientId("");
+      setOauthClientSecret("");
       setAuthMode("none");
       setShowForm(false);
       load();
@@ -178,14 +215,20 @@ function ConnectorsManager() {
 
   const drafts = connectors?.filter((c) => !c.enabled) ?? [];
   const active = connectors?.filter((c) => c.enabled) ?? [];
+  const isGithubPreset = url === GITHUB_MCP_PRESET.url;
 
   return (
     <div>
       <div className="flex items-center justify-between mb-1">
         <h1 className="text-lg font-semibold">Connectors</h1>
-        <button className="btn-primary" onClick={() => setShowForm((s) => !s)}>
-          {showForm ? "Cancel" : "Add connector"}
-        </button>
+        <div className="flex gap-2">
+          <button className="btn-default" onClick={quickConnectGithub}>
+            Quick connect: GitHub
+          </button>
+          <button className="btn-primary" onClick={() => setShowForm((s) => !s)}>
+            {showForm ? "Cancel" : "Add connector"}
+          </button>
+        </div>
       </div>
       <p className="text-sm text-muted mb-4">
         The only way the agent reaches anything outside its own workspace — GitHub included. Each tool
@@ -213,8 +256,41 @@ function ConnectorsManager() {
           </div>
           {authMode === "static_token" && (
             <div>
-              <label className="label">Bearer token</label>
+              <label className="label">
+                {isGithubPreset ? "Personal access token" : "Bearer token"}
+              </label>
               <input className="input" type="password" value={staticToken} onChange={(e) => setStaticToken(e.target.value)} />
+              {isGithubPreset && (
+                <p className="text-xs text-muted mt-1">
+                  A fine-grained PAT works — this is separate from the "Connect GitHub" sync
+                  credential under GitHub Sync, and only needs whatever scopes the tools you plan
+                  to use require.
+                </p>
+              )}
+            </div>
+          )}
+          {authMode === "oauth" && (
+            <div className="space-y-2 border border-line rounded-md p-3">
+              <p className="text-xs text-muted">
+                Most servers support one-click OAuth automatically. Some — GitHub's own remote MCP
+                server included — don't implement dynamic client registration and need a
+                pre-registered OAuth App instead. Leave both fields below blank unless you know
+                this server needs one; if OAuth connect fails with a dynamic-registration error,
+                come back and fill these in.
+              </p>
+              <div>
+                <label className="label">OAuth Client ID (optional)</label>
+                <input className="input" value={oauthClientId} onChange={(e) => setOauthClientId(e.target.value)} />
+              </div>
+              <div>
+                <label className="label">OAuth Client Secret (optional, confidential clients only)</label>
+                <input
+                  className="input"
+                  type="password"
+                  value={oauthClientSecret}
+                  onChange={(e) => setOauthClientSecret(e.target.value)}
+                />
+              </div>
             </div>
           )}
           <button className="btn-primary" disabled={busy || !name || !url} onClick={create}>

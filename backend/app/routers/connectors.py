@@ -33,6 +33,7 @@ async def _to_out(row: dict) -> McpServerOut:
         enabled=row["enabled"],
         default_permission_state=row["default_permission_state"],
         discovered_tools=tools,
+        oauth_client_id=row.get("oauth_client_id"),
         last_handshake_at=row.get("last_handshake_at"),
         last_handshake_error=row.get("last_handshake_error"),
         created_at=row["created_at"],
@@ -60,13 +61,32 @@ async def create_connector(body: McpServerCreate, user: AuthedUser = Depends(ver
     connectors have an {id} to redirect against; for none/static_token modes the
     handshake runs right away since no redirect is needed. Either way, nothing
     merges into any project's tool set until the person calls /confirm — §9.4's
-    runtime tool merge only ever looks at enabled=true servers."""
+    runtime tool merge only ever looks at enabled=true servers.
+
+    Phase 4.3: also accepts a pre-registered oauth_client_id (and, for a
+    confidential client, oauth_client_secret) — see mcp_oauth.py's module
+    docstring for why this exists (GitHub's own remote MCP server is the
+    concrete real-world case that doesn't work without it). Stored now, used
+    by oauth_start below at connect time.
+    """
     if body.auth_mode == "static_token" and not body.static_token:
         raise HTTPException(status_code=400, detail="static_token is required when auth_mode is 'static_token'.")
+    if body.oauth_client_secret and not body.oauth_client_id:
+        raise HTTPException(status_code=400, detail="oauth_client_secret requires oauth_client_id to also be set.")
+    if (body.oauth_client_id or body.oauth_client_secret) and body.auth_mode != "oauth":
+        raise HTTPException(
+            status_code=400, detail="oauth_client_id/oauth_client_secret only apply when auth_mode is 'oauth'."
+        )
 
     auth_token_ref = None
     if body.auth_mode == "static_token":
         auth_token_ref = await vault.create_secret(body.static_token, name=f"mcp-token:{user.user_id}")
+
+    oauth_client_secret_ref = None
+    if body.oauth_client_secret:
+        oauth_client_secret_ref = await vault.create_secret(
+            body.oauth_client_secret, name=f"mcp-oauth-client-secret:{user.user_id}"
+        )
 
     row = await repo.create(
         user.user_id,
@@ -75,6 +95,8 @@ async def create_connector(body: McpServerCreate, user: AuthedUser = Depends(ver
             "url": body.url,
             "auth_mode": body.auth_mode,
             "auth_token_ref": auth_token_ref,
+            "oauth_client_id": body.oauth_client_id,
+            "oauth_client_secret_ref": oauth_client_secret_ref,
             "enabled": False,
             "default_permission_state": body.default_permission_state,
         },
@@ -105,11 +127,22 @@ async def oauth_start(connector_id: str, user: AuthedUser = Depends(verified_use
     try:
         metadata = await mcp_oauth.discover_metadata(row["url"])
         redirect_uri = _callback_url(connector_id)
-        client_id = await mcp_oauth.register_client(metadata.registration_endpoint, redirect_uri) if metadata.registration_endpoint else None
-        if client_id is None:
+        if row.get("oauth_client_id"):
+            # Phase 4.3: a stored pre-registered client always wins over
+            # attempting DCR, even if the server happens to also advertise a
+            # registration_endpoint — the person explicitly supplied this one
+            # (typically because DCR is known not to work against this
+            # server; GitHub's remote MCP server is the confirmed case this
+            # was added for — see mcp_oauth.py's module docstring).
+            client_id = row["oauth_client_id"]
+        elif metadata.registration_endpoint:
+            client_id = await mcp_oauth.register_client(metadata.registration_endpoint, redirect_uri)
+        else:
             raise ValueError(
                 "Server has no dynamic client registration endpoint — it expects a "
-                "pre-registered client this backend doesn't have. Try 'static token' mode instead."
+                "pre-registered client. Add this connector's OAuth Client ID (and Client "
+                "Secret, if it's confidential) and try again, or use 'static token' mode "
+                "instead if the server accepts a personal access token."
             )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=str(exc))
@@ -123,6 +156,7 @@ async def oauth_start(connector_id: str, user: AuthedUser = Depends(verified_use
             "connector_id": connector_id,
             "code_verifier": verifier,
             "client_id": client_id,
+            "client_secret_ref": row.get("oauth_client_secret_ref"),
             "token_endpoint": metadata.token_endpoint,
             "redirect_uri": redirect_uri,
         },
@@ -140,9 +174,18 @@ async def oauth_callback(connector_id: str, code: str = Query(...), state: str =
     if entry is None or entry["connector_id"] != connector_id:
         return RedirectResponse(f"{settings.frontend_url}/connections/connectors?error=invalid_or_expired_state")
 
+    client_secret = None
+    if entry.get("client_secret_ref"):
+        client_secret = await vault.read_secret(entry["client_secret_ref"])
+
     try:
         token_response = await mcp_oauth.exchange_code(
-            entry["token_endpoint"], entry["client_id"], code, entry["redirect_uri"], entry["code_verifier"]
+            entry["token_endpoint"],
+            entry["client_id"],
+            code,
+            entry["redirect_uri"],
+            entry["code_verifier"],
+            client_secret=client_secret,
         )
     except Exception as exc:  # noqa: BLE001
         return RedirectResponse(f"{settings.frontend_url}/connections/connectors?error={exc}")
@@ -260,5 +303,11 @@ async def delete_connector(connector_id: str, user: AuthedUser = Depends(verifie
         await vault.delete_secret(row["auth_token_ref"])
     if row.get("oauth_session_ref"):
         await vault.delete_secret(row["oauth_session_ref"])
+    if row.get("oauth_client_secret_ref"):
+        # Phase 4.3: the pre-registered confidential client's secret, when one
+        # was stored — same "invalidating its Vault credential in the same
+        # operation" requirement §9.2 already states for the other two refs
+        # on this row, just as real a credential as either of them.
+        await vault.delete_secret(row["oauth_client_secret_ref"])
     await repo.delete_for_user(user.user_id, connector_id)
     await audit.record(user.user_id, "mcp_server_admin", "delete", True, output_summary=row["name"])
