@@ -12,6 +12,9 @@ from app.models.schemas import (
     ProjectMemoryOut,
     ProjectMemoryUpdate,
     ProjectOut,
+    ProjectScheduleCreate,
+    ProjectScheduleOut,
+    ProjectScheduleUpdate,
     ProjectUpdate,
 )
 from app.repositories import (
@@ -21,9 +24,10 @@ from app.repositories import (
     mcp_servers as connectors_repo,
     project_knowledge as project_knowledge_repo,
     project_memory as project_memory_repo,
+    project_schedules as project_schedules_repo,
     projects as repo,
 )
-from app.services import git_sync, github_oauth, vault, workspace_service
+from app.services import git_sync, github_oauth, scheduler, scheduler_rules, vault, workspace_service
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -389,3 +393,146 @@ async def delete_project_knowledge(project_id: str, note_id: str, user: AuthedUs
         output_summary=note_id,
         initiated_by="user",
     )
+
+
+# ---------------------------------------------------------------------------
+# Scheduling / Proactive Scanning (§26, Phase 4.5) — optional, opt-in, per
+# project. CRUD lives behind the project's own Settings, the same pattern as
+# Memory/Project Knowledge above. Actually *running* a schedule is
+# app/services/scheduler.py's job — the background poll loop on its own
+# cadence, or the "run now" endpoint at the bottom of this section, which is
+# deliberately routed through that exact same module's trigger_schedule
+# function rather than a second, parallel way of starting a run.
+# ---------------------------------------------------------------------------
+
+
+def _schedule_to_out(row: dict) -> ProjectScheduleOut:
+    return ProjectScheduleOut(
+        id=row["id"],
+        project_id=row["project_id"],
+        description=row["description"],
+        frequency=row["frequency"],
+        cron_expression=row.get("cron_expression"),
+        enabled=row["enabled"],
+        last_run_at=row.get("last_run_at"),
+        last_session_id=row.get("last_session_id"),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _validate_schedule_fields(frequency: str, cron_expression: str | None) -> None:
+    """0009_scheduling.sql's own check constraint enforces "cron_expression
+    is required when frequency == 'custom'" at the DB level; this rejects
+    the same problem earlier, with a clearer message, and additionally
+    validates that a supplied cron_expression is a syntactically real 5-field
+    crontab expression (scheduler_rules.validate_cron_expression) — the DB
+    constraint has no way to check that, it would otherwise only surface the
+    first time the scheduler loop tried to evaluate it against
+    scheduler_rules.is_due and croniter raised."""
+    if frequency == "custom":
+        if not cron_expression:
+            raise HTTPException(status_code=400, detail="cron_expression is required when frequency is 'custom'.")
+        error = scheduler_rules.validate_cron_expression(cron_expression)
+        if error:
+            raise HTTPException(status_code=400, detail=f"Invalid cron_expression: {error}")
+
+
+@router.get("/{project_id}/schedules", response_model=list[ProjectScheduleOut])
+async def list_project_schedules(project_id: str, user: AuthedUser = Depends(verified_user)):
+    rows = await project_schedules_repo.list_owned(user.user_id, project_id)
+    if rows is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    return [_schedule_to_out(row) for row in rows]
+
+
+@router.post("/{project_id}/schedules", response_model=ProjectScheduleOut, status_code=status.HTTP_201_CREATED)
+async def create_project_schedule(
+    project_id: str, body: ProjectScheduleCreate, user: AuthedUser = Depends(verified_user)
+):
+    if not body.description.strip():
+        raise HTTPException(status_code=400, detail="description must be non-empty.")
+    _validate_schedule_fields(body.frequency, body.cron_expression)
+    row = await project_schedules_repo.create_owned(
+        user.user_id, project_id, body.description, body.frequency, body.cron_expression, body.enabled
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    await audit.record(
+        user.user_id,
+        "schedule",
+        "create",
+        True,
+        project_id=project_id,
+        output_summary=body.description[:200],
+        initiated_by="user",
+    )
+    return _schedule_to_out(row)
+
+
+@router.patch("/{project_id}/schedules/{schedule_id}", response_model=ProjectScheduleOut)
+async def update_project_schedule(
+    project_id: str, schedule_id: str, body: ProjectScheduleUpdate, user: AuthedUser = Depends(verified_user)
+):
+    fields = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
+    if not fields:
+        raise HTTPException(status_code=400, detail="No fields to update.")
+    if "frequency" in fields or "cron_expression" in fields:
+        existing = await project_schedules_repo.get_owned(user.user_id, project_id, schedule_id)
+        if existing is None:
+            raise HTTPException(status_code=404, detail="Schedule not found.")
+        frequency = fields.get("frequency", existing["frequency"])
+        cron_expression = fields.get("cron_expression", existing.get("cron_expression"))
+        _validate_schedule_fields(frequency, cron_expression)
+    row = await project_schedules_repo.update_owned(user.user_id, project_id, schedule_id, fields)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Schedule not found.")
+    await audit.record(
+        user.user_id,
+        "schedule",
+        "update",
+        True,
+        project_id=project_id,
+        output_summary=schedule_id,
+        initiated_by="user",
+    )
+    return _schedule_to_out(row)
+
+
+@router.delete("/{project_id}/schedules/{schedule_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_project_schedule(project_id: str, schedule_id: str, user: AuthedUser = Depends(verified_user)):
+    deleted = await project_schedules_repo.delete_owned(user.user_id, project_id, schedule_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Schedule not found.")
+    await audit.record(
+        user.user_id,
+        "schedule",
+        "delete",
+        True,
+        project_id=project_id,
+        output_summary=schedule_id,
+        initiated_by="user",
+    )
+
+
+@router.post("/{project_id}/schedules/{schedule_id}/run", response_model=ProjectScheduleOut)
+async def run_project_schedule_now(project_id: str, schedule_id: str, user: AuthedUser = Depends(verified_user)):
+    """Not part of §26's own text — a small, low-risk addition alongside it:
+    triggers this schedule immediately, through the exact same
+    scheduler.trigger_schedule the background poll loop itself calls (see
+    that function's own docstring), rather than waiting for its next due
+    tick. Useful mainly to confirm a freshly-created schedule is actually
+    wired up correctly (the connector it needs really is granted, the
+    project's LLM credential resolves) without waiting up to 24 hours to
+    find out. Does not require the schedule to be `enabled` — running it
+    once manually doesn't imply turning its recurring cadence back on, and
+    `trigger_schedule` itself has no opinion on `enabled` either way (see
+    project_schedules_repo.list_enabled's own docstring)."""
+    existing = await project_schedules_repo.get_owned(user.user_id, project_id, schedule_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Schedule not found.")
+    started = await scheduler.trigger_schedule(existing, initiated_by="user")
+    if not started:
+        raise HTTPException(status_code=502, detail="Could not start a session for this schedule — see server logs.")
+    row = await project_schedules_repo.get_owned(user.user_id, project_id, schedule_id)
+    return _schedule_to_out(row)

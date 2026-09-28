@@ -34,14 +34,33 @@ async def list_for_project(user_id: str, project_id: str) -> list[dict] | None:
     return await run_in_threadpool(_call)
 
 
-async def create_for_project(user_id: str, project_id: str, title: str | None) -> dict | None:
+async def create_for_project(
+    user_id: str,
+    project_id: str,
+    title: str | None,
+    trigger: str = "user",
+    schedule_id: str | None = None,
+) -> dict | None:
+    """`trigger`/`schedule_id` — Phase 4.5 (§26): who/what started this
+    session. Every interactive caller (routers/sessions.py) leaves both at
+    their defaults; app/services/scheduler.py is the one caller that passes
+    trigger="scheduled" and its own project_schedules row's id, at the exact
+    moment the row is created — a single atomic insert, rather than an
+    insert-then-update, so there's no window where a freshly-created
+    scheduled session would briefly read back as trigger='user' if anything
+    raced to read it in between."""
     project = await get_project_for_user(user_id, project_id)
     if project is None:
         return None
     client = get_service_client()
 
     def _call():
-        return client.table(TABLE).insert({"project_id": project_id, "title": title}).execute().data[0]
+        return (
+            client.table(TABLE)
+            .insert({"project_id": project_id, "title": title, "trigger": trigger, "schedule_id": schedule_id})
+            .execute()
+            .data[0]
+        )
 
     row = await run_in_threadpool(_call)
     await _enforce_concurrency_cap(project_id, just_created_session_id=row["id"])
@@ -58,7 +77,17 @@ async def _enforce_concurrency_cap(project_id: str, just_created_session_id: str
 
     'Least recently used' — updated_at ascending, the only recency signal this
     phase's schema has (no turn loop yet to generate richer activity data;
-    Phase 3's turn loop will naturally keep updated_at fresh on real activity)."""
+    Phase 3's turn loop will naturally keep updated_at fresh on real activity).
+
+    Phase 4.5 note: this applies to a scheduler-created session exactly the
+    same as an interactive one — §26 is explicit that a scheduled run
+    "starts a session exactly the way a person's message would," with "no
+    separate, more permissive code path." A concrete consequence follows
+    from taking that literally: a schedule firing while a person already has
+    two writable sessions open on the same project will demote their own
+    least-recently-used one to read-only, same as a third interactive
+    session would. See docs/PHASE4_5_NOTES.md — this is a deliberate reading
+    of the spec, not an oversight."""
     writable = await list_writable_for_project(project_id)
     others = [s for s in writable if s["id"] != just_created_session_id]
     if len(others) < 2:

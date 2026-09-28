@@ -37,6 +37,20 @@ class Settings(BaseSettings):
 
     cors_allowed_origins: str = "http://localhost:3000"
 
+    # --- Scheduling (§26, Phase 4.5) ---
+    # How often the in-process scheduler loop (app/services/scheduler.py)
+    # polls project_schedules for anything due. This is the *only* mechanism
+    # driving a scheduled run — see docs/PHASE4_5_NOTES.md for why an
+    # in-process asyncio loop rather than a separate Render Cron Job service,
+    # and the real consequence that follows from it (a schedule can't fire
+    # while this single free-tier Render instance is asleep). 60s is frequent
+    # enough that "hourly"/"daily" due-checks (whole-minute granularity is
+    # more than enough there) and a custom cron expression's own minute-level
+    # granularity both land within a minute of their real target time,
+    # without polling so often it's the dominant source of idle-time load on
+    # a free-tier instance.
+    scheduler_poll_interval_seconds: int = 60
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.cors_allowed_origins.split(",") if o.strip()]

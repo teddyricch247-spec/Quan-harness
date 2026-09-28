@@ -1,10 +1,9 @@
-# Quan Harness — Phases 1-3 + 4.1-4.4
+# Quan Harness — Phases 1-3 + 4 (complete)
 
 A hosted, multi-tenant web application that lets a signed-up person delegate
 coding tasks to an AI agent with real access to their own codebase. This repo
-now covers **Phases 1–3 of 9, plus Phase 4's Memory System, Project
-Knowledge, Connector Integration, and Auto-Provisioning sub-prompts
-(4.1–4.4)**, from the full roadmap:
+now covers **Phases 1–3 of 9, plus all of Phase 4 (4.1–4.5)** from the full
+roadmap:
 
 - **Phase 1 — Foundations:** auth, connections, projects/sessions data model,
   platform operations. See `docs/PHASE1_NOTES.md`.
@@ -33,6 +32,17 @@ Knowledge, Connector Integration, and Auto-Provisioning sub-prompts
   exist before, and an 'import an existing repository' setup mode that
   hardcoded "main" as the default branch and never actually pulled the
   repository's content into the workspace. See `docs/PHASE4_3_4_4_NOTES.md`.
+- **Phase 4.5 — Scheduling / Proactive Scanning:** a person can configure a
+  recurring, opt-in check per project ("look for failing CI," "check for new
+  dependency vulnerabilities") on an hourly, daily, or custom cron-style
+  cadence. When one comes due, it starts a session exactly the way a
+  person's own message would — identical turn loop, system prompt, and
+  permission machinery — with exactly one difference: every mutating tool
+  call in that run is treated as Ask regardless of the project's configured
+  Auto/Ask/Off states, since nobody is actively watching it. Runs on an
+  in-process background loop (no separate cron service exists to point at);
+  see `docs/PHASE4_5_NOTES.md` for that tradeoff and everything else this
+  pass decided or left open.
 
 There's now a real, running agent that also remembers: send a message to a
 session and it plans, edits files, runs commands, asks for approval on
@@ -40,9 +50,11 @@ anything flagged, and — once the turn ends — quietly updates what it knows
 about this project and about you, the same loop end to end. Connecting a
 real external tool (GitHub's own MCP server included) and importing an
 existing repository both now work the way their own UI copy already claimed
-they did. What's still missing — scheduling (4.5), the deploy pipeline, Live
-Preview, sub-agent delegation, visual QA, and beyond — is exactly what
-`docs/PHASE4_1_4_2_NOTES.md`'s closing section hands off next.
+they did. And a project can now watch itself on a schedule, without anyone
+needing to remember to ask it to. **Phase 4 is complete.** What's still
+missing — the deploy pipeline, Live Preview, sub-agent delegation, visual QA,
+and beyond (Phase 5 onward) — is exactly what `docs/PHASE4_5_NOTES.md`'s
+closing section hands off next.
 
 ## What's in here
 
@@ -57,7 +69,7 @@ NOTICES.md         Third-party attribution — §29's licensing requirement
 ## Quick start (local dev)
 
 1. **Database.** Create a Supabase project, then follow `docs/YOUR_SETUP_CHECKLIST.md`
-   and `db/migrations/README.md` to run the eight migration files against it.
+   and `db/migrations/README.md` to run the nine migration files against it.
 
 2. **Fly.io** (Phase 2 — powers every project's workspace). Create a
    **dedicated** Fly.io org and follow `docs/YOUR_SETUP_CHECKLIST.md` §3
@@ -83,7 +95,10 @@ NOTICES.md         Third-party attribution — §29's licensing requirement
    uvicorn app.main:app --reload
    ```
    Runs on http://localhost:8000. Visit `/docs` for the interactive API reference
-   (FastAPI's built-in Swagger UI).
+   (FastAPI's built-in Swagger UI). On startup this also launches the Phase
+   4.5 scheduler poll loop in-process (`scheduler_poll_interval_seconds`,
+   default 60s) — it needs nothing extra to run locally, but with no
+   `project_schedules` rows yet it has nothing to do.
 
 5. **Frontend.**
    ```bash
@@ -116,7 +131,9 @@ Phase 4.1/4.2 added 50 more pure-module tests (`test_memory.py`,
 `test_project_knowledge.py`, plus additions to `test_system_prompt.py`).
 Phase 4.3 added 6 more to `test_tool_schemas.py`, covering the new
 `oauth_session_ref`/`oauth_client_secret_ref` threading through
-`merge_mcp_tools` and `should_attempt_oauth_refresh`'s own decision logic —
+`merge_mcp_tools` and `should_attempt_oauth_refresh`'s own decision logic.
+Phase 4.5 adds `test_scheduler_rules.py`, covering `scheduler_rules.is_due`'s
+hourly/daily/custom-cron due-computation and `validate_cron_expression` —
 **none of this suite, across any phase, has ever actually been run under
 `pytest` in an environment this was built in** (none had `pytest` or network
 access) — run it for real first, and treat any failure there as more
@@ -125,11 +142,12 @@ trustworthy than any pass/fail claim in these docs. See `docs/PHASE3_NOTES.md`.
 `test_push_pull_integration.py` need real Supabase/Fly.io/GitHub credentials
 (`test_execute_bash_env_isolation.py` does not — it is pure). `agent_loop.py`'s tool dispatch and
 approval-resume path are covered by `test_agent_loop_audit.py`; its turn loop
-(`_run_inner`) — including Phase 4.3's new OAuth refresh-and-retry branch in
-`_execute_mcp`/`_refresh_oauth_token` — `mcp_tools.py`, `mcp_oauth.py`, and
+(`_run_inner`) — including Phase 4.3's OAuth refresh-and-retry branch and
+Phase 4.5's forced-Ask/nested-escalation branches in `_action_resolved_approval`
+— `scheduler.py`'s poll loop, `mcp_tools.py`, `mcp_oauth.py`, and
 `routers/agent.py` have no automated coverage at all beyond manual review —
 see each file's own docstring, `docs/PHASE3_NOTES.md`, and
-`docs/PHASE4_3_4_4_NOTES.md` for exactly what's been run versus reasoned
+`docs/PHASE4_5_NOTES.md` for exactly what's been run versus reasoned
 through.
 
 ## Where to go next
@@ -140,8 +158,8 @@ through.
 - **`docs/DEPLOYMENT.md`** — putting the backend on Render and the frontend on
   Vercel, matching the spec's tech stack (§2).
 - **`docs/PHASE1_NOTES.md`** / **`docs/PHASE2_NOTES.md`** / **`docs/PHASE3_NOTES.md`**
-  / **`docs/PHASE4_1_4_2_NOTES.md`** / **`docs/PHASE4_3_4_4_NOTES.md`**
-  — what's real, what's a documented rough edge, and what the next phase
-  needs to pick up.
+  / **`docs/PHASE4_1_4_2_NOTES.md`** / **`docs/PHASE4_3_4_4_NOTES.md`** /
+  **`docs/PHASE4_5_NOTES.md`** — what's real, what's a documented rough edge,
+  and what the next phase needs to pick up.
 - **`NOTICES.md`** — third-party attribution per §29. Aider, OpenHands, and
   DeepSeek Harness are all filled in as of Phase 3.

@@ -9,7 +9,8 @@ nothing here has run against a real database, workspace, or LLM credential in
 the sandbox this was built in (no network — see /docs/PHASE3_NOTES.md), so
 treat this module as reviewed-and-reasoned-through rather than proven.
 
-ENTRY POINTS (called by app/routers/agent.py):
+ENTRY POINTS (called by app/routers/agent.py, and — for start_turn only —
+app/services/scheduler.py, Phase 4.5):
   start_turn(session_id, user_id, text)       -- a fresh user message
   send_interrupt(session_id, user_id, text)   -- mid-run steering (§16.2)
   resume_after_approval(session_id, user_id)  -- after an Ask-gate resolves
@@ -22,9 +23,15 @@ approval session are all "take a new turn on this session," and §16.4's own
 crash-recovery scan is written to run "on any session resume, before taking a
 new turn," not only after a literal process crash. Treating all three
 identically is what makes that scan meaningful instead of a special case.
+Phase 4.5 adds a fourth caller of `start_turn` (scheduler.py, on a
+project_schedules row's behalf) but no fourth code path here — §26 is
+explicit that a scheduled run "starts a session exactly the way a person's
+message would," so it goes through this exact function, unchanged, the same
+way every other caller does.
 
 DESIGN DECISIONS NOT SPELLED OUT VERBATIM IN THE SPEC EXCERPT (see
-/docs/PHASE3_NOTES.md for the fuller writeup of each):
+/docs/PHASE3_NOTES.md for the fuller writeup of each, and
+/docs/PHASE4_5_NOTES.md for the Phase 4.5 item below):
   - Checkpoint creation is NOT triggered from here. file_tools.py/
     shell_tools.py already create one, unconditionally, inside str_replace/
     create_file/execute_bash themselves (Phase 2). §16.2's pseudocode line
@@ -50,6 +57,17 @@ DESIGN DECISIONS NOT SPELLED OUT VERBATIM IN THE SPEC EXCERPT (see
   - `is_read_only` on a bash/native call is a fixed per-tool-name property
     (tool_partition.py); nothing here inspects execute_bash's command text to
     guess read-only-ness, matching §16.2's own explicit reasoning.
+  - §26, Phase 4.5: a scheduled run's forced-Ask treatment applies to every
+    *mutating* tool call only — a read-only call (view_file, web_search, a
+    side-effect-free connector tool) still executes freely, with no approval
+    gate, exactly as it would interactively. §26's own text ("every one of
+    its own tool calls") reads broadly, but gating investigation itself
+    would make a scheduled *scan* impossible to complete unattended (there
+    would be no one to approve the very first view_file), directly
+    contradicting the same paragraph's "if a scheduled run's investigation
+    surfaces something needing approval, it stops there" — which presupposes
+    the investigation itself can run to completion first. tool_partition.py's
+    existing read-only/mutating split is what this reads "tool calls" against.
 """
 import asyncio
 import datetime
@@ -157,7 +175,14 @@ def _broadcast_done(session_id: str, status: str) -> None:
 async def start_turn(session_id: str, user_id: str, text: str) -> bool:
     """A fresh message into a session. Returns False (and does nothing) if the
     session is read-only or a loop is already running on it — the router
-    surfaces that as a plain 409, not a silent drop."""
+    surfaces that as a plain 409, not a silent drop.
+
+    Phase 4.5: this is also the exact function scheduler.py calls to start a
+    scheduled run, passing the schedule's own description as `text` and the
+    project owner's user_id (there is no live request/user for a background
+    poll tick to take user_id from) — see that module's own docstring.
+    Nothing here changes for that caller: it's a fresh message into a
+    (freshly created, trigger='scheduled') session like any other."""
     if not _claim_session(session_id):
         return False
     try:
@@ -574,10 +599,11 @@ _NATIVE_AUDIT_CATEGORY = {
 def _audit_labels(name: str, mcp_tool: tool_schemas.MergedMcpTool | None) -> tuple[str, str]:
     """(tool, action) for one audit_log row. `mcp_tool` is the resolved
     connector tool when `name` is an mcp__ name that's actually available to
-    this project; None otherwise. A name that maps to nothing still gets a row
-    (a hallucinated tool name, or a connector tool that's no longer granted, is
-    exactly the kind of thing §27's "regardless of outcome" is for) — just under
-    a category that says so, rather than being silently dropped or misfiled."""
+    this project; None otherwise. A name that maps to nothing still gets a
+    row (a hallucinated tool name, or a connector tool that's no longer
+    granted, is exactly the kind of thing §27's "regardless of outcome" is
+    for) — just under a category that says so, rather than being silently
+    dropped or misfiled."""
     if name.startswith("mcp__"):
         if mcp_tool is not None:
             return f"mcp:{mcp_tool.server_name}", mcp_tool.real_tool_name
@@ -626,12 +652,14 @@ async def _execute_call(
     """§27: "audit_log... the complete record of everything that happened,
     across every tool, regardless of outcome." `_execute_call` is the one
     chokepoint every real tool execution passes through — the normal turn
-    loop below and §16.4's crash-recovery re-execution both call it, nothing
-    calls `_execute_native`/`_execute_mcp` directly — so instrumenting here
-    once covers every caller rather than threading an audit_repo.record call
-    into each of view_file/str_replace/create_file/run_lint/run_tests/
-    update_plan/every mcp__ tool individually. A tool added in a later phase
-    is audited by default, with a category of 'unknown' until it's added to
+    loop below, §16.4's crash-recovery re-execution, and Phase 4.5's
+    scheduled-forced-Ask approval resume (`_action_resolved_approval`'s
+    `scheduled_tool:` branch) all call it, nothing calls
+    `_execute_native`/`_execute_mcp` directly — so instrumenting here once
+    covers every caller rather than threading an audit_repo.record call into
+    each of view_file/str_replace/create_file/run_lint/run_tests/update_plan/
+    every mcp__ tool individually. A tool added in a later phase is audited
+    by default, with a category of 'unknown' until it's added to
     `_NATIVE_AUDIT_CATEGORY` above.
 
     execute_bash is the one exception, deliberately skipped here:
@@ -678,12 +706,23 @@ async def _fetch_secret_names(user_id: str, project_id: str) -> list[str]:
     return [r["name"] for r in rows] if rows else []
 
 
-def _resolve_permission_for_call(name: str, merged: tool_schemas.MergedToolSchema) -> str:
+def _resolve_permission_for_call(name: str, merged: tool_schemas.MergedToolSchema, force_ask: bool = False) -> str:
     """Native tools have no stored permission_state at all — execute_bash's
     own guard result at call time IS its Ask signal (§16.2: 'never something
     the model reports about itself'); str_replace/create_file/run_lint/
     run_tests/update_plan are always Auto. Only an mcp__ tool consults the
-    merged schema's resolved state."""
+    merged schema's resolved state.
+
+    `force_ask` — §26, Phase 4.5: a scheduled run (session.trigger ==
+    'scheduled') forces every mutating call, native or connector, through
+    Ask, "regardless of the project's configured Auto/Ask/Off states." This
+    is the one call site that implements that — everything downstream (the
+    turn loop's mutating-call branch below, `_action_resolved_approval`)
+    just reacts to whatever this returns, unaware of *why* it's 'ask' this
+    time. Checked first, before either existing rule, so it overrides both
+    uniformly rather than needing a separate carve-out in each."""
+    if force_ask:
+        return "ask"
     if name.startswith("mcp__"):
         return merged.permission_state_by_name().get(name, "ask")  # missing == treat cautiously, not silently Auto
     return "auto"
@@ -716,6 +755,9 @@ async def _finish_turn(
        extraction call is invisible to the person's own view of their
        session — they see their turn finish the moment it actually does,
        not whenever the backend also happens to finish writing memory.
+       Unchanged for a scheduled run (Phase 4.5) — §26 gives memory no
+       special treatment, and a scheduled run's own findings are exactly
+       the kind of durable, project-specific fact §20 wants captured.
 
     memory_extraction.extract_after_turn is already best-effort internally
     (see its own docstring) — every exception is caught inside the three
@@ -757,6 +799,16 @@ async def _run_inner(session_id: str, user_id: str) -> None:
     project = await projects_repo.get_by_id(session["project_id"])
     if project is None:
         return
+
+    # §26, Phase 4.5: whether *this* session was started by a
+    # project_schedules row (scheduler.py) rather than a person typing a
+    # message. Read once per resume from the session's own durable
+    # `trigger` column (0009_scheduling.sql) — not passed in as an argument
+    # anywhere — so it's exactly as crash-safe as everything else this
+    # function reconstructs from durable state on every entry: a process
+    # restart mid-scheduled-run resumes still treating every mutating call
+    # as Ask, because the session row itself still says trigger='scheduled'.
+    is_scheduled = session.get("trigger") == "scheduled"
 
     events = await session_events_repo.list_for_session(session_id)
 
@@ -819,7 +871,15 @@ async def _run_inner(session_id: str, user_id: str) -> None:
 
     approval_event = _find_unactioned_resolved_approval(events)
     if approval_event is not None:
-        await _action_resolved_approval(session, project, user_id, approval_event, events)
+        result = await _action_resolved_approval(session, project, user_id, approval_event, events)
+        if result == "waiting_approval":
+            # §26, Phase 4.5: the approved call itself needs a second,
+            # nested approval (an approved scheduled execute_bash call that
+            # also trips the heuristic guard — see
+            # _action_resolved_approval's own docstring). Already left the
+            # session at status='waiting_approval' and broadcast that;
+            # nothing left for this turn loop to do until that resolves too.
+            return
         events = await session_events_repo.list_for_session(session_id)
 
     # --- Fresh turn loop starts here (§16.2/§16.3/§16.4: a resumed session
@@ -911,6 +971,7 @@ async def _run_inner(session_id: str, user_id: str) -> None:
             ),
             what_you_know_about_this_person=system_prompt.format_what_you_know_about_this_person(user_memory_md),
             what_you_know_about_this_project=system_prompt.format_what_you_know_about_this_project(project_memory_md),
+            scheduled_run_notice=system_prompt.format_scheduled_run_notice(is_scheduled),
         )
         system_text = system_prompt.assemble(dynamic)
         tools = tool_schemas.build_full_tool_list(merged_mcp)
@@ -964,7 +1025,10 @@ async def _run_inner(session_id: str, user_id: str) -> None:
         side_effect_free = merged_mcp.side_effect_free_by_name()
         read_only_calls, mutating_calls = tool_partition.partition(response.tool_calls, side_effect_free)
 
-        # --- read-only batch: appended contiguously, executed concurrently ---
+        # --- read-only batch: appended contiguously, executed concurrently.
+        # §26, Phase 4.5: unaffected by is_scheduled — a scheduled run's
+        # forced-Ask treatment only ever applies within the mutating batch
+        # below (see module docstring for why). ---
         read_only_events = []
         for call in read_only_calls:
             event = await _append(
@@ -1004,9 +1068,18 @@ async def _run_inner(session_id: str, user_id: str) -> None:
 
         # --- mutating batch: sequential, one at a time, gate-aware ---
         for call in mutating_calls:
-            permission_state = _resolve_permission_for_call(call.name, merged_mcp)
+            permission_state = _resolve_permission_for_call(call.name, merged_mcp, force_ask=is_scheduled)
 
-            if call.name == "execute_bash" or permission_state != "ask":
+            if permission_state != "ask":
+                # Auto — a native tool (str_replace/create_file/run_lint/
+                # run_tests/update_plan/execute_bash) on an ordinary
+                # interactive session, or an mcp__ tool this project has set
+                # to Auto. Never reached for *any* mutating call on a
+                # scheduled session (is_scheduled forces "ask" above), so
+                # execute_bash's own heuristic-guard escalation below is —
+                # deliberately — an interactive-only path; a scheduled run's
+                # execute_bash calls are gated by the `else` branch further
+                # down instead, before shell_tools.execute_bash ever runs.
                 call_event = await _append(
                     session_id,
                     "agent",
@@ -1052,7 +1125,7 @@ async def _run_inner(session_id: str, user_id: str) -> None:
                     parent_event_id=call_event["id"],
                 )
                 turn_stuck_events.append(_to_stuck_event(call, outcome))
-            else:  # an mcp__ tool set to Ask
+            elif call.name.startswith("mcp__"):  # a connector tool set to Ask (or forced to Ask — §26)
                 call_event = await _append(
                     session_id,
                     "agent",
@@ -1089,6 +1162,41 @@ async def _run_inner(session_id: str, user_id: str) -> None:
                     await sessions_repo.update_fields(session_id, {"status": "waiting_approval"})
                     _broadcast_done(session_id, "waiting_approval")
                     return
+            else:
+                # §26, Phase 4.5 — a native tool forced to Ask. Only
+                # reachable when is_scheduled is True (a native tool's
+                # permission_state is always "auto" otherwise, so the first
+                # branch above always takes it on an interactive session).
+                # Uses its own action_type vocabulary member
+                # ('scheduled_tool:<name>', see 0009_scheduling.sql's
+                # comment) rather than reusing 'execute_bash_escalation' even
+                # for execute_bash specifically — this is a different
+                # question ("should this call happen at all, unattended")
+                # than that mechanism answers ("does this specific command
+                # trip the heuristic guard"); keeping them distinct means an
+                # approved scheduled execute_bash call still passes through
+                # the guard normally afterward (see
+                # _action_resolved_approval) rather than silently bypassing
+                # it the way an approved guard-escalation deliberately does.
+                call_event = await _append(
+                    session_id,
+                    "agent",
+                    "tool_call",
+                    {"step": step, "call_id": call.id, "name": call.name, "arguments": call.arguments, "read_only": False},
+                )
+                action_type = f"scheduled_tool:{call.name}"
+                payload = {"name": call.name, "arguments": call.arguments}
+                approval_row = await approval_requests_repo.create(session_id, action_type, payload)
+                await _append(
+                    session_id,
+                    "system",
+                    "approval_request",
+                    {"approval_request_id": approval_row["id"], "action_type": action_type, "payload": payload},
+                    parent_event_id=call_event["id"],
+                )
+                await sessions_repo.update_fields(session_id, {"status": "waiting_approval"})
+                _broadcast_done(session_id, "waiting_approval")
+                return
 
             check = stuck_detector.run_stuck_detector(turn_stuck_events, already_soft_nudged_this_turn)
             if check.hard_stop:
@@ -1155,11 +1263,19 @@ def _find_unactioned_resolved_approval(events: list[dict]) -> dict | None:
     return None
 
 
-async def _action_resolved_approval(session: dict, project: dict, user_id: str, approval_event: dict, events: list[dict]) -> None:
+async def _action_resolved_approval(
+    session: dict, project: dict, user_id: str, approval_event: dict, events: list[dict]
+) -> str | None:
+    """Returns "waiting_approval" when acting on the just-resolved approval
+    immediately produced a *new* pending approval (Phase 4.5's nested
+    guard-escalation case — see the `scheduled_tool:` branch below), so
+    `_run_inner` knows not to fall through into a fresh turn loop iteration;
+    returns None in every other case (rejected, or resolved to a plain
+    tool_result), the same as before this return value was added."""
     approval_id = approval_event["content"]["approval_request_id"]
     approval_row = await approval_requests_repo.get_owned(user_id, approval_id)
     if approval_row is None or approval_row["status"] == "pending":
-        return  # shouldn't happen (caller already confirmed nothing's pending) — defensive only
+        return None  # shouldn't happen (caller already confirmed nothing's pending) — defensive only
 
     approved = approval_row["status"] == "approved"
     await _append(
@@ -1173,7 +1289,7 @@ async def _action_resolved_approval(session: dict, project: dict, user_id: str, 
     # find the original tool_call this approval was gating
     tool_call_event = next((e for e in events if e["id"] == approval_event["parent_event_id"]), None)
     if tool_call_event is None:
-        return
+        return None
 
     if not approved:
         await _append(
@@ -1183,7 +1299,7 @@ async def _action_resolved_approval(session: dict, project: dict, user_id: str, 
             {"ok": False, "content": "", "error": "Rejected by the user.", "checkpoint_id": None},
             parent_event_id=tool_call_event["id"],
         )
-        return
+        return None
 
     action_type = approval_row["action_type"]
     payload = approval_row["payload"]
@@ -1202,6 +1318,62 @@ async def _action_resolved_approval(session: dict, project: dict, user_id: str, 
             content=f"exit {bash_result.exit_code}\nstdout:\n{bash_result.stdout}\nstderr:\n{bash_result.stderr}",
             checkpoint_id=bash_result.checkpoint_id,
         )
+    elif action_type.startswith("scheduled_tool:"):
+        # §26, Phase 4.5 — the approved call was a native tool a scheduled
+        # run's forced-Ask treatment gated (see the turn loop's own branch
+        # above). Runs through the normal _execute_call chokepoint exactly
+        # like an Auto-executed call would (audit row included, via
+        # _execute_call's own instrumentation), with one deliberate
+        # difference from the execute_bash_escalation branch just above:
+        # this does NOT pass bypass_guard=True. The approval just granted
+        # was "yes, run this specific command," not "yes, also override the
+        # credential/sudo/git-remote/etc. guard for it" — those are separate
+        # questions, and conflating them would let approving an ordinary
+        # scheduled command silently grant guard-bypass too. If the guard
+        # also blocks it, that's a second, genuine execute_bash_escalation,
+        # requested here exactly the way the normal turn loop requests one
+        # (parented to the same original tool_call_event, so its eventual
+        # resolution still reports back to the right place) — not silently
+        # dropped.
+        name = payload.get("name", "")
+        arguments = payload.get("arguments", {})
+        merged = await _fetch_merged_tool_schema(user_id, project["id"])
+        viewed_paths = _reconstruct_viewed_paths(events)
+        outcome = await _execute_call(
+            project["id"],
+            session["id"],
+            user_id,
+            name,
+            arguments,
+            viewed_paths,
+            merged,
+            session,
+            conversation_snapshot=events,
+        )
+        if outcome.needs_approval:
+            escalation_row = await approval_requests_repo.create(
+                session["id"],
+                "execute_bash_escalation",
+                {
+                    "command": arguments.get("command", ""),
+                    "timeout_seconds": _safe_int(arguments.get("timeout_seconds"), default=120),
+                    "guard_reason": outcome.guard_reason,
+                },
+            )
+            await _append(
+                session["id"],
+                "system",
+                "approval_request",
+                {
+                    "approval_request_id": escalation_row["id"],
+                    "action_type": "execute_bash_escalation",
+                    "payload": escalation_row["payload"],
+                },
+                parent_event_id=tool_call_event["id"],
+            )
+            await sessions_repo.update_fields(session["id"], {"status": "waiting_approval"})
+            _broadcast_done(session["id"], "waiting_approval")
+            return "waiting_approval"
     else:
         merged = await _fetch_merged_tool_schema(user_id, project["id"])
         model_tool_name = payload.get("model_tool_name", "")
@@ -1232,6 +1404,7 @@ async def _action_resolved_approval(session: dict, project: dict, user_id: str, 
         {"ok": outcome.ok, "content": outcome.content, "error": outcome.error, "checkpoint_id": outcome.checkpoint_id},
         parent_event_id=tool_call_event["id"],
     )
+    return None
 
 
 async def _run_compaction(session_id: str, credential: llm_client.ResolvedCredential, events: list[dict]) -> None:

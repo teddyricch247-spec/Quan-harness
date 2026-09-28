@@ -16,6 +16,13 @@ litellm==1.55.4  # Phase 3 (§7, §16.2): the LLM wrapper agent_loop.py's call_l
   # not verified against a real installed copy in this environment (no
   # network — see /docs/PHASE3_NOTES.md), so confirm it still resolves before
   # deploying.
+croniter==2.0.5  # Phase 4.5 (§26): parses a schedule's custom cron-style
+  # expression (app/services/scheduler_rules.py) — standard 5-field crontab
+  # syntax, interpreted in UTC. A small, long-established, pure-Python
+  # dependency; not verified against a real installed copy in this
+  # environment (no network — the same standing gap the litellm comment
+  # above flags), so confirm it still resolves before deploying, same as
+  # every other pin in this file.
 
 # Optional (Phase 2, §22's tree-sitter parse-error check) — not installed by
 # default; see /docs/PHASE2_NOTES.md's rough-edges section for why. Uncomment

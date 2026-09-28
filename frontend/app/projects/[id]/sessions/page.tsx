@@ -71,7 +71,15 @@ function SessionsList() {
               <p className="font-medium text-sm">{s.title ?? "Untitled session"}</p>
               <p className="text-xs text-muted mono">{new Date(s.created_at).toLocaleString()}</p>
             </div>
-            <span className={`text-xs font-medium ${statusColor(s.status)}`}>{s.status}</span>
+            <div className="flex items-center gap-2">
+              {/* Phase 4.5 (§26) — started by a project_schedules row rather
+                  than a person's own message; everything else about it
+                  (status, turn loop, approvals) is identical either way. */}
+              {s.trigger === "scheduled" && (
+                <span className="text-xs text-muted border border-line rounded px-1.5 py-0.5">Scheduled</span>
+              )}
+              <span className={`text-xs font-medium ${statusColor(s.status)}`}>{s.status}</span>
+            </div>
           </div>
         ))}
       </div>

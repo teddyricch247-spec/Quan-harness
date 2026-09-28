@@ -370,14 +370,30 @@ class DynamicSections:
     what_you_know_about_this_person: str | None = None  # §20, Phase 4.1 — None if build_user_memory is empty
     what_you_know_about_this_project: str | None = None  # §20, Phase 4.1 — None if project_memory is empty
     current_plan: str | None = None  # None if sessions.plan is empty
+    # §26, Phase 4.5 — None on every interactively-started session; only set
+    # (via format_scheduled_run_notice) when this turn belongs to a session
+    # whose trigger == 'scheduled'. Deliberately not part of §18's original
+    # numbered list — added after it, first in render order, since it
+    # recontextualizes how the rest of the prompt (SECURITY's own "OK to do
+    # without asking" list, in particular) applies to *this* run. Kept as a
+    # dynamic section rather than a new STATIC_* block specifically so the
+    # cacheable static prefix (assemble_static(), see its own docstring)
+    # stays byte-identical regardless of trigger — only the never-cached
+    # dynamic tail differs.
+    scheduled_run_notice: str | None = None
 
 
 def render_dynamic_sections(dynamic: DynamicSections) -> str:
     """Pure formatting for the dynamic half of §18. Order matches §18's own
     list exactly: REPO_CONTEXT, PROJECT_KNOWLEDGE, PROJECT_SECRETS,
     WHAT_YOU_KNOW_ABOUT_THIS_PERSON, WHAT_YOU_KNOW_ABOUT_THIS_PROJECT,
-    CURRENT_PLAN, CURRENT_DATETIME."""
-    sections = [("REPO_CONTEXT", dynamic.repo_context)]
+    CURRENT_PLAN, CURRENT_DATETIME — with SCHEDULED_RUN (Phase 4.5, not part
+    of that original list) placed first whenever it applies, so it frames
+    everything that follows rather than trailing behind it."""
+    sections: list[tuple[str, str]] = []
+    if dynamic.scheduled_run_notice:
+        sections.append(("SCHEDULED_RUN", dynamic.scheduled_run_notice))
+    sections.append(("REPO_CONTEXT", dynamic.repo_context))
     if dynamic.project_knowledge:
         sections.append(("PROJECT_KNOWLEDGE", dynamic.project_knowledge))
     if dynamic.project_secrets:
@@ -477,3 +493,32 @@ def format_current_plan(plan_steps: list[dict]) -> str | None:
         return None
     marks = {"pending": "[ ]", "in_progress": "[~]", "done": "[x]"}
     return "\n".join(f"{marks.get(s.get('status'), '[ ]')} {s.get('step', '')}" for s in plan_steps)
+
+
+def format_scheduled_run_notice(is_scheduled: bool) -> str | None:
+    """§26, Phase 4.5. None (→ section omitted) for an ordinary interactive
+    session — the normal case. When True, names the one behavioral
+    difference explicitly rather than leaving the model to infer it from
+    SECURITY's now-contradicted "OK to do without asking" list the hard way
+    (proposing an Auto-configured connector call, or a plain file edit, and
+    having the turn simply pause instead of completing) — see
+    agent_loop.py's _resolve_permission_for_call, the actual enforcement
+    this text describes; this section is explanatory, not itself the
+    mechanism."""
+    if not is_scheduled:
+        return None
+    return (
+        "This turn is a scheduled, unattended run — nobody is actively watching it. "
+        "Every tool call that would change anything (a file edit, a shell command, "
+        "any connector tool) requires the person's explicit approval before it "
+        "executes, regardless of what SECURITY above says about which tools are "
+        "normally Auto for this project — treat every mutating tool call as "
+        "Ask-gated for this entire run. A tool call that needs approval pauses "
+        "this run immediately and ends your turn; you will not see its result and "
+        "cannot continue past it, so investigate as fully as you can with read-only "
+        "tools first, and propose only the specific action(s) you actually want to "
+        "take. You cannot push your findings out either — that stays a direct human "
+        "action. If your investigation finds nothing worth changing, say so plainly "
+        "and end your turn; you do not need to propose an action just to have done "
+        "something."
+    )

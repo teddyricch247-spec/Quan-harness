@@ -214,6 +214,13 @@ class SessionOut(BaseModel):
     turn_iteration_count: int
     read_only: bool
     read_only_reason: str | None
+    # Phase 4.5 (§26): 'user' for every interactively-created session (every
+    # session created before this phase is implicitly this, via the column's
+    # own DB default); 'scheduled' only for one app/services/scheduler.py
+    # created on a project_schedules row's behalf. schedule_id is that row's
+    # id when trigger == 'scheduled', else None.
+    trigger: str
+    schedule_id: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -364,5 +371,39 @@ class ProjectKnowledgeOut(BaseModel):
     body: str
     trigger_type: str
     trigger_value: str
+    created_at: datetime
+    updated_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Scheduling / Proactive Scanning (§26) — Phase 4.5
+# ---------------------------------------------------------------------------
+
+ScheduleFrequency = Literal["hourly", "daily", "custom"]
+
+
+class ProjectScheduleCreate(BaseModel):
+    description: str  # stands in as the initiating user message on every run (§16.1)
+    frequency: ScheduleFrequency
+    cron_expression: str | None = None  # required, and only meaningful, when frequency == "custom"
+    enabled: bool = True
+
+
+class ProjectScheduleUpdate(BaseModel):
+    description: str | None = None
+    frequency: ScheduleFrequency | None = None
+    cron_expression: str | None = None
+    enabled: bool | None = None
+
+
+class ProjectScheduleOut(BaseModel):
+    id: str
+    project_id: str
+    description: str
+    frequency: str
+    cron_expression: str | None
+    enabled: bool
+    last_run_at: datetime | None
+    last_session_id: str | None
     created_at: datetime
     updated_at: datetime

@@ -76,6 +76,13 @@ export interface Session {
   turn_iteration_count: number;
   read_only: boolean;
   read_only_reason: "concurrency_cap" | "checkpoint_restore" | null;
+  // Phase 4.5 (§26) — 'user' for every interactively-created session (every
+  // session created before this phase is implicitly this, via the backend
+  // column's own default); 'scheduled' only for one app/services/scheduler.py
+  // started on a ProjectSchedule's behalf. schedule_id is that schedule's id
+  // when trigger === 'scheduled', else null.
+  trigger: "user" | "scheduled";
+  schedule_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -143,6 +150,22 @@ export interface ProjectKnowledgeNote {
   body: string;
   trigger_type: "keyword" | "path";
   trigger_value: string;
+  created_at: string;
+  updated_at: string;
+}
+
+// Phase 4.5 (§26) — a recurring, opt-in check on a project. See
+// docs/PHASE4_5_NOTES.md for the full behavior (forced-Ask on every mutating
+// tool call during a run it starts, UTC-only cron, etc).
+export interface ProjectSchedule {
+  id: string;
+  project_id: string;
+  description: string; // stands in as the initiating message on every run
+  frequency: "hourly" | "daily" | "custom";
+  cron_expression: string | null; // set, and only meaningful, when frequency === "custom"; UTC
+  enabled: boolean;
+  last_run_at: string | null;
+  last_session_id: string | null;
   created_at: string;
   updated_at: string;
 }

@@ -14,6 +14,7 @@ import {
   Project,
   ProjectKnowledgeNote,
   ProjectMemory,
+  ProjectSchedule,
   ProjectSecret,
 } from "@/lib/types";
 
@@ -36,6 +37,11 @@ function ProjectSettings() {
   const [newNoteBody, setNewNoteBody] = useState("");
   const [newNoteTriggerType, setNewNoteTriggerType] = useState<"keyword" | "path">("keyword");
   const [newNoteTriggerValue, setNewNoteTriggerValue] = useState("");
+  const [schedules, setSchedules] = useState<ProjectSchedule[]>([]);
+  const [newScheduleDescription, setNewScheduleDescription] = useState("");
+  const [newScheduleFrequency, setNewScheduleFrequency] = useState<"hourly" | "daily" | "custom">("daily");
+  const [newScheduleCron, setNewScheduleCron] = useState("");
+  const [scheduleBusyId, setScheduleBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
@@ -55,6 +61,7 @@ function ProjectSettings() {
       })
       .catch(() => {});
     apiFetch<ProjectKnowledgeNote[]>(`/projects/${params.id}/knowledge`).then(setKnowledge).catch(() => {});
+    apiFetch<ProjectSchedule[]>(`/projects/${params.id}/schedules`).then(setSchedules).catch(() => {});
   }
 
   useEffect(loadAll, [params.id]);
@@ -175,6 +182,63 @@ function ProjectSettings() {
     } catch (e) {
       setError((e as ApiError).message);
       loadAll();
+    }
+  }
+
+  async function addSchedule() {
+    setError(null);
+    try {
+      await apiFetch<ProjectSchedule>(`/projects/${params.id}/schedules`, {
+        method: "POST",
+        body: JSON.stringify({
+          description: newScheduleDescription,
+          frequency: newScheduleFrequency,
+          cron_expression: newScheduleFrequency === "custom" ? newScheduleCron : null,
+        }),
+      });
+      setNewScheduleDescription("");
+      setNewScheduleCron("");
+      loadAll();
+    } catch (e) {
+      setError((e as ApiError).message);
+    }
+  }
+
+  async function toggleScheduleEnabled(id: string, enabled: boolean) {
+    setSchedules(schedules.map((s) => (s.id === id ? { ...s, enabled } : s)));
+    try {
+      await apiFetch(`/projects/${params.id}/schedules/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ enabled }),
+      });
+    } catch (e) {
+      setError((e as ApiError).message);
+      loadAll();
+    }
+  }
+
+  async function deleteSchedule(id: string) {
+    setSchedules(schedules.filter((s) => s.id !== id));
+    try {
+      await apiFetch(`/projects/${params.id}/schedules/${id}`, { method: "DELETE" });
+    } catch (e) {
+      setError((e as ApiError).message);
+      loadAll();
+    }
+  }
+
+  async function runScheduleNow(id: string) {
+    setError(null);
+    setScheduleBusyId(id);
+    try {
+      const updated = await apiFetch<ProjectSchedule>(`/projects/${params.id}/schedules/${id}/run`, {
+        method: "POST",
+      });
+      setSchedules(schedules.map((s) => (s.id === id ? updated : s)));
+    } catch (e) {
+      setError((e as ApiError).message);
+    } finally {
+      setScheduleBusyId(null);
     }
   }
 
@@ -403,6 +467,87 @@ function ProjectSettings() {
             onClick={addNote}
           >
             Add note
+          </button>
+        </div>
+      </section>
+
+      <section className="card space-y-3">
+        <p className="font-medium text-sm">Scheduling</p>
+        <p className="text-sm text-muted">
+          A recurring, opt-in check the agent runs on its own — "look for failing CI," "check for
+          new dependency vulnerabilities." It starts a session exactly the way sending it a message
+          would, with one difference: every tool call that would change anything requires your
+          approval before it executes, no matter this project's connector Auto/Ask/Off settings
+          above — nobody is watching a scheduled run as it happens. Custom cron expressions are
+          interpreted in UTC.
+        </p>
+        {schedules.length > 0 && (
+          <ul className="space-y-2">
+            {schedules.map((s) => (
+              <li key={s.id} className="border border-line rounded-md p-3 text-sm space-y-2">
+                <div className="flex items-start justify-between gap-2">
+                  <p className={s.enabled ? "" : "text-muted line-through"}>{s.description}</p>
+                  <label className="flex items-center gap-1 text-xs text-muted whitespace-nowrap">
+                    <input
+                      type="checkbox"
+                      checked={s.enabled}
+                      onChange={(e) => toggleScheduleEnabled(s.id, e.target.checked)}
+                    />
+                    Enabled
+                  </label>
+                </div>
+                <p className="text-xs text-muted mono">
+                  {s.frequency === "custom" ? s.cron_expression : s.frequency}
+                  {s.last_run_at ? ` — last run ${new Date(s.last_run_at).toLocaleString()}` : " — never run yet"}
+                </p>
+                <div className="flex gap-3">
+                  <button
+                    className="text-accent text-xs disabled:opacity-40"
+                    disabled={scheduleBusyId === s.id}
+                    onClick={() => runScheduleNow(s.id)}
+                  >
+                    {scheduleBusyId === s.id ? "Starting…" : "Run now"}
+                  </button>
+                  <button className="text-accent text-xs" onClick={() => deleteSchedule(s.id)}>
+                    Remove
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+        <div className="space-y-2">
+          <textarea
+            className="input min-h-[60px]"
+            placeholder="Check for failing CI on the default branch and report what's broken."
+            value={newScheduleDescription}
+            onChange={(e) => setNewScheduleDescription(e.target.value)}
+          />
+          <div className="flex gap-2">
+            <select
+              className="input"
+              value={newScheduleFrequency}
+              onChange={(e) => setNewScheduleFrequency(e.target.value as "hourly" | "daily" | "custom")}
+            >
+              <option value="hourly">Hourly</option>
+              <option value="daily">Daily</option>
+              <option value="custom">Custom (cron, UTC)</option>
+            </select>
+            {newScheduleFrequency === "custom" && (
+              <input
+                className="input mono"
+                placeholder="0 9 * * 1-5"
+                value={newScheduleCron}
+                onChange={(e) => setNewScheduleCron(e.target.value)}
+              />
+            )}
+          </div>
+          <button
+            className="btn-default disabled:opacity-40"
+            disabled={!newScheduleDescription || (newScheduleFrequency === "custom" && !newScheduleCron)}
+            onClick={addSchedule}
+          >
+            Add schedule
           </button>
         </div>
       </section>
