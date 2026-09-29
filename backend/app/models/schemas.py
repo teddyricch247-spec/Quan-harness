@@ -187,6 +187,16 @@ class ProjectOut(BaseModel):
     # only the initial pull needs retrying, from the Workspace panel's own
     # Pull button.
     import_pull_error: str | None = None
+    # Phase 5.1/5.2/5.5 (§23.5/§23.6) — repo_origin decides whether the
+    # monorepo-detection/confirmation step ever runs for this project at
+    # all (see db/migrations/0010_deploy_pipeline.sql and
+    # app/services/deploy_pipeline.py). deploy_targets is the confirmed (or,
+    # while deploy_targets_confirmed is False, merely proposed) shape the
+    # frontend's deploy/confirm UI reads and posts back to
+    # POST /projects/{id}/deploy/targets.
+    repo_origin: str
+    deploy_targets: list[dict]
+    deploy_targets_confirmed: bool
 
 
 class ProjectConnectorsAccessUpdate(BaseModel):
@@ -407,3 +417,73 @@ class ProjectScheduleOut(BaseModel):
     last_session_id: str | None
     created_at: datetime
     updated_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Deploy pipeline (§23.5, §23.6, §23.9) — Phase 5.1/5.2/5.5
+# ---------------------------------------------------------------------------
+
+
+class DeployTarget(BaseModel):
+    """One entry of projects.deploy_targets — the confirmed (or, before
+    confirmation, merely proposed) shape of one deployable root. stack/
+    build_cmd/run_cmd/port are None until §23.5's detection has resolved
+    them at least once for this target."""
+
+    name: str
+    root: str
+    stack: str | None = None
+    build_cmd: str | None = None
+    run_cmd: str | None = None
+    port: int | None = None
+
+
+class DeployTargetsConfirmRequest(BaseModel):
+    """§23.6: the person's own confirmation of a proposed (or edited) set of
+    deploy targets. Only name/root are accepted from the person — stack/
+    build_cmd/run_cmd/port are always re-detected on the next deploy (see
+    deploy_pipeline.confirm_targets's own docstring for why)."""
+
+    targets: list[dict] = Field(..., min_length=1)
+
+
+class DeployTriggerRequest(BaseModel):
+    # §23.6 — re-runs root detection (for an 'imported' project) or clears a
+    # 'scratch' project's single resolved target, forcing §23.5's detection
+    # to run again from scratch on this deploy, in case the repository's
+    # actual structure or stack has changed since it was last resolved.
+    force_redetect: bool = False
+
+
+class DeployTriggerResult(BaseModel):
+    status: str  # 'running' — a 202-style "started" response, no run ids yet (a monorepo starts several at once)
+
+
+class DeployNeedsConfirmationResult(BaseModel):
+    """The 409-shaped response §23.6's monorepo detection returns instead of
+    starting a deploy — same "needs_confirmation" shape PullResult already
+    established for the same reason (an action that can't proceed without
+    the person's own input isn't a plain error)."""
+
+    needs_confirmation: bool = True
+    proposed_targets: list[DeployTarget]
+
+
+class DeployRunOut(BaseModel):
+    id: str
+    project_id: str
+    status: str  # 'running' | 'success' | 'failed'
+    target_name: str | None
+    phase: str  # 'detect' | 'build' | 'start' | 'healthy'
+    stack: str | None
+    build_cmd: str | None
+    run_cmd: str | None
+    port: int | None
+    exit_code: int | None
+    stdout: str
+    stderr: str
+    failure_class: str | None
+    diagnosis_text: str | None
+    suggested_fix_prompt: str | None
+    created_at: datetime
+    completed_at: datetime | None

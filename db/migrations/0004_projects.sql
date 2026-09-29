@@ -16,7 +16,7 @@ create table projects (
     github_credential_id uuid references github_credentials(id),  -- nullable — sync-only, see §8
     llm_credential_id uuid references llm_credentials(id),        -- null = use account default
     test_command text,
-    deploy_targets jsonb not null default '[]'::jsonb,             -- [{name, root, build_cmd, run_cmd, port}] — Phase 2/5
+    deploy_targets jsonb not null default '[]'::jsonb,             -- [{name, root, stack, build_cmd, run_cmd, port}] — Phase 2 shape, Phase 5.1/5.2/5.5 is what actually writes to it (added 'stack'; comment-only edit, no schema change)
     preview_subdomain text,                                        -- stable per-project subdomain — Phase 2/5
     max_turn_iterations integer not null default 50,
     created_at timestamptz not null default now()

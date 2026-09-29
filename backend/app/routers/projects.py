@@ -47,6 +47,9 @@ async def _to_out(row: dict, import_pull_error: str | None = None) -> ProjectOut
         harness_branch_ready=row.get("harness_branch_ready", False),
         created_at=row["created_at"],
         import_pull_error=import_pull_error,
+        repo_origin=row.get("repo_origin", "scratch"),
+        deploy_targets=row.get("deploy_targets") or [],
+        deploy_targets_confirmed=row.get("deploy_targets_confirmed", False),
     )
 
 
@@ -143,6 +146,15 @@ async def create_project(body: ProjectCreate, user: AuthedUser = Depends(verifie
             "github_default_branch": github_default_branch,
             "github_credential_id": body.github_credential_id,
             "llm_credential_id": body.llm_credential_id,
+            # Phase 5.1/5.2/5.5 (§23.6): the one distinction the deploy
+            # pipeline's monorepo-detection gate cares about — 'import' is a
+            # codebase the harness didn't build and doesn't already know the
+            # shape of; 'scratch' and 'create_new_repo' both start from a
+            # structure Quan Harness itself is the author of (or that
+            # doesn't exist yet), so they collapse to the same 'scratch'
+            # value here. See db/migrations/0010_deploy_pipeline.sql and
+            # app/services/deploy_pipeline.py.
+            "repo_origin": "imported" if body.mode == "import" else "scratch",
         },
     )
 

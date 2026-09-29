@@ -10,7 +10,23 @@ import re
 import shlex
 from dataclasses import dataclass
 
-REPO_ROOT = "/workspace/repo"  # duplicated literal, not import, to keep this module dependency-free — see workspace_paths.py, the source of truth
+REPO_ROOT = "/home/sprite/repo"  # duplicated literal, not import, to keep this module dependency-free — see workspace_paths.py, the source of truth.
+# Gap fixed in Phase 5.1/5.2/5.5's audit: this was still "/workspace/repo"
+# (the Fly Machines-era Volume mount path) after workspace_paths.py's own
+# REPO_ROOT moved to "/home/sprite/repo" during the Sprites port (see that
+# module's docstring). Since this file's whole reason to duplicate the
+# literal rather than import it is to stay dependency-free for unit testing
+# — not because the two are meant to ever disagree — the port silently left
+# _escapes_workspace() checking every absolute path token against the wrong
+# root: a legitimate `/home/sprite/repo/...` token would have been flagged
+# as escaping the workspace (fails "starts with the *old* REPO_ROOT"), while
+# the actually-unreachable `/workspace/repo/...` would have been waved
+# through. Likely low real-world impact so far — shell_tools.execute_bash
+# always runs with cwd=REPO_ROOT (the correct, current one, imported from
+# workspace_paths.py), so most agent-issued commands use relative paths and
+# never exercise this branch — but a real, live inconsistency all the same.
+# See /docs/PHASE5_1_5_2_5_5_NOTES.md and backend/tests/test_heuristic_guard.py's
+# updated test_absolute_path_inside_workspace_is_allowed.
 
 _CREDENTIAL_PATH_MARKERS = (".aws", ".ssh", ".netrc")
 _GIT_REMOTE_SUBCOMMANDS = {"remote", "push", "pull", "fetch", "clone", "checkout", "branch", "switch"}

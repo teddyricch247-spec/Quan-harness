@@ -8,6 +8,7 @@ import AuthGuard from "@/components/AuthGuard";
 import ErrorBanner from "@/components/ErrorBanner";
 import WorkspaceShell from "@/components/WorkspaceShell";
 import WorkspaceSyncPanel from "@/components/WorkspaceSyncPanel";
+import DeployPanel from "@/components/DeployPanel";
 import { apiFetch, ApiError } from "@/lib/api";
 import { Project } from "@/lib/types";
 
@@ -78,14 +79,17 @@ function ProjectWorkspace() {
           </div>
         }
         right={
-          <div className="card">
-            <p className="text-sm font-medium mb-1">Live Preview — not built yet</p>
-            <p className="text-sm text-muted">
-              The proxied iframe preview (§11.2, §23) lands with the Deploy Pipeline in Phase 5.
-              Push, Pull, and checkpoints are real now, below — they were originally guessed to
-              land alongside Live Preview in Phase 1's placeholder text here, but §23.3's
-              implementation order actually puts them in Phase 2.
-            </p>
+          <div className="space-y-4">
+            <DeployPanel project={project} onProjectChanged={() => apiFetch<Project>(`/projects/${project.id}`).then(setProject).catch(() => {})} />
+            <div className="card">
+              <p className="text-sm font-medium mb-1">Live Preview — not built yet</p>
+              <p className="text-sm text-muted">
+                Build/start/failure-diagnosis (§23.5/§23.6/§23.9) are live above (Phase 5.1/5.2/5.5).
+                The proxied iframe view itself (§23's Live Preview proper) is a separate, later
+                sub-prompt (5.3) — for now, a successful deploy means the app is running inside
+                its workspace, just not yet embedded here.
+              </p>
+            </div>
           </div>
         }
       />

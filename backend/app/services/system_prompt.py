@@ -370,6 +370,12 @@ class DynamicSections:
     what_you_know_about_this_person: str | None = None  # §20, Phase 4.1 — None if build_user_memory is empty
     what_you_know_about_this_project: str | None = None  # §20, Phase 4.1 — None if project_memory is empty
     current_plan: str | None = None  # None if sessions.plan is empty
+    # §23.9 point 3, Phase 5.1/5.2/5.5 — None unless the project's most recent
+    # deploy_run both failed and produced a diagnosis. Cleared the moment a
+    # newer deploy_run exists (success or failure) — see
+    # format_last_deploy_diagnosis's own docstring for why "most recent
+    # regardless of outcome" is the right staleness rule.
+    last_deploy_diagnosis: str | None = None
     # §26, Phase 4.5 — None on every interactively-started session; only set
     # (via format_scheduled_run_notice) when this turn belongs to a session
     # whose trigger == 'scheduled'. Deliberately not part of §18's original
@@ -389,7 +395,12 @@ def render_dynamic_sections(dynamic: DynamicSections) -> str:
     WHAT_YOU_KNOW_ABOUT_THIS_PERSON, WHAT_YOU_KNOW_ABOUT_THIS_PROJECT,
     CURRENT_PLAN, CURRENT_DATETIME — with SCHEDULED_RUN (Phase 4.5, not part
     of that original list) placed first whenever it applies, so it frames
-    everything that follows rather than trailing behind it."""
+    everything that follows rather than trailing behind it, and
+    DEPLOY_DIAGNOSIS (§23.9, Phase 5.1/5.2/5.5, likewise not part of §18's
+    original list) placed right after CURRENT_PLAN — a failed deploy is
+    exactly the kind of "what's the current state of this project" context
+    CURRENT_PLAN already occupies this position for, just sourced from the
+    deploy pipeline instead of the agent's own plan tool."""
     sections: list[tuple[str, str]] = []
     if dynamic.scheduled_run_notice:
         sections.append(("SCHEDULED_RUN", dynamic.scheduled_run_notice))
@@ -404,6 +415,8 @@ def render_dynamic_sections(dynamic: DynamicSections) -> str:
         sections.append(("WHAT_YOU_KNOW_ABOUT_THIS_PROJECT", dynamic.what_you_know_about_this_project))
     if dynamic.current_plan:
         sections.append(("CURRENT_PLAN", dynamic.current_plan))
+    if dynamic.last_deploy_diagnosis:
+        sections.append(("DEPLOY_DIAGNOSIS", dynamic.last_deploy_diagnosis))
     sections.append(("CURRENT_DATETIME", dynamic.current_datetime))
     return "\n\n".join(f"<{name}>\n{body}\n</{name}>" for name, body in sections)
 
@@ -481,6 +494,42 @@ def format_what_you_know_about_this_person(memory_md: str | None) -> str | None:
     if not memory_md or not memory_md.strip():
         return None
     return memory_md.strip()
+
+
+def format_last_deploy_diagnosis(deploy_run: dict | None) -> str | None:
+    """§23.9 point 3: "attached as available context for the main agent's
+    next turn — informational only." `deploy_run` is the project's single
+    most recent deploy_runs row (agent_loop.py fetches it fresh each
+    iteration via deploy_runs_repo.get_latest_for_project, same "fetched
+    fresh" pattern as project_knowledge). None (→ section omitted) unless
+    that most recent run both failed and produced a diagnosis — deliberately
+    "most recent regardless of outcome," not "most recent failure": once a
+    newer deploy exists, whatever it says (success, or a different failure)
+    is the current truth about this project's deployability, and the old
+    diagnosis would be actively misleading left in context after that.
+
+    §23.9 point 3 is explicit this is "informational only... The agent does
+    not act on it unless the person explicitly asks" — worded here as an
+    instruction, not just a data dump, for the same reason
+    format_scheduled_run_notice's own docstring gives for being explanatory
+    rather than assuming the model infers the right behavior from data alone.
+    The wording also carries §23.9 point 4's build-vs-environment distinction
+    through into the prompt: an environment-class diagnosis is phrased so the
+    model doesn't go looking for a code fix that was never there to find."""
+    if not deploy_run or deploy_run.get("status") != "failed" or not deploy_run.get("diagnosis_text"):
+        return None
+    target = f" (target: {deploy_run['target_name']})" if deploy_run.get("target_name") else ""
+    if deploy_run.get("failure_class") == "environment":
+        return (
+            f"The most recent deploy{target} failed for an environment/configuration reason, not a code bug:\n"
+            f"{deploy_run['diagnosis_text']}\n\n"
+            "Don't propose a code change for this unless the person asks — it isn't something a code edit fixes."
+        )
+    body = f"The most recent deploy{target} failed:\n{deploy_run['diagnosis_text']}"
+    if deploy_run.get("suggested_fix_prompt"):
+        body += f"\n\nSuggested fix: {deploy_run['suggested_fix_prompt']}"
+    body += "\n\nOnly act on this if the person explicitly asks you to fix it."
+    return body
 
 
 def format_current_plan(plan_steps: list[dict]) -> str | None:

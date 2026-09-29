@@ -35,6 +35,7 @@ from app.routers import (
     audit_log,
     auth,
     connectors,
+    deploy,
     github_credential,
     llm_credentials,
     projects,
@@ -85,6 +86,7 @@ app.include_router(projects.router)
 app.include_router(sessions.router)
 app.include_router(workspace.router)
 app.include_router(agent.router)
+app.include_router(deploy.router)
 app.include_router(audit_log.router)
 
 

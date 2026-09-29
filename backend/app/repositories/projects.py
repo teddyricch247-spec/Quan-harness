@@ -160,6 +160,29 @@ async def set_harness_branch_ready(project_id: str) -> None:
     await run_in_threadpool(_call)
 
 
+async def set_deploy_targets(project_id: str, targets: list[dict], confirmed: bool) -> dict:
+    """§23.6 — either the proposed-but-unconfirmed shape (confirmed=False,
+    written so a person re-opening the confirmation UI sees what was last
+    proposed rather than nothing) or the person's own confirmed shape
+    (confirmed=True, from then on used as-is on every deploy — "no repeated
+    inference at deploy time"). Also used by deploy_pipeline.py to write the
+    auto-confirmed single-root shape for a 'scratch'-origin project, and to
+    persist a target's resolved build_cmd/run_cmd/port back onto
+    deploy_targets once §23.5's detection has run for it once."""
+    client = get_service_client()
+
+    def _call():
+        return (
+            client.table(TABLE)
+            .update({"deploy_targets": targets, "deploy_targets_confirmed": confirmed})
+            .eq("id", project_id)
+            .execute()
+            .data[0]
+        )
+
+    return await run_in_threadpool(_call)
+
+
 async def get_connector_access(project_id: str) -> list[str]:
     client = get_service_client()
 

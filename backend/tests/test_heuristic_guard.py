@@ -26,7 +26,13 @@ def test_absolute_path_outside_workspace_is_blocked():
 
 
 def test_absolute_path_inside_workspace_is_allowed():
-    result = classify_command("cat /workspace/repo/README.md")
+    # /home/sprite/repo is the real, current REPO_ROOT (Sprites' own
+    # home-directory convention — see workspace_paths.py). Was
+    # "/workspace/repo" here (the old Fly Machines Volume mount path) until
+    # Phase 5.1/5.2/5.5's audit caught guard_rules.py's own duplicated
+    # REPO_ROOT literal having silently gone stale during the Sprites port —
+    # see that module's REPO_ROOT comment.
+    result = classify_command("cat /home/sprite/repo/README.md")
     assert result.blocked is False
 
 

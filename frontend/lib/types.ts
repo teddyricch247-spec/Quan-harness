@@ -62,6 +62,50 @@ export interface Project {
   // and only when the automatic first Pull failed. Undefined/null everywhere
   // else. A non-null value never means project creation itself failed.
   import_pull_error?: string | null;
+  // Phase 5.1/5.2/5.5 (§23.5/§23.6) — repo_origin decides whether the
+  // monorepo-detection/confirmation step ever runs (see DeployPanel.tsx).
+  repo_origin: "scratch" | "imported";
+  deploy_targets: DeployTarget[];
+  deploy_targets_confirmed: boolean;
+}
+
+// Phase 5.1/5.2/5.5 (§23.5/§23.6/§23.9)
+export interface DeployTarget {
+  name: string;
+  root: string;
+  stack: "nextjs" | "node" | "python" | "dockerfile" | "llm_fallback" | null;
+  build_cmd: string | null;
+  run_cmd: string | null;
+  port: number | null;
+}
+
+export interface DeployTriggerResult {
+  status: "running";
+}
+
+export interface DeployNeedsConfirmationResult {
+  needs_confirmation: true;
+  proposed_targets: DeployTarget[];
+}
+
+export interface DeployRun {
+  id: string;
+  project_id: string;
+  status: "running" | "success" | "failed";
+  target_name: string | null;
+  phase: "detect" | "build" | "start" | "healthy";
+  stack: string | null;
+  build_cmd: string | null;
+  run_cmd: string | null;
+  port: number | null;
+  exit_code: number | null;
+  stdout: string;
+  stderr: string;
+  failure_class: "build" | "environment" | null;
+  diagnosis_text: string | null;
+  suggested_fix_prompt: string | null;
+  created_at: string;
+  completed_at: string | null;
 }
 
 export interface Session {

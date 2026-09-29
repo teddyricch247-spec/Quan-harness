@@ -11,6 +11,12 @@ explicit positive/negative tests of both new CHECK constraints, the
 behavior, all run inside a transaction that was then rolled back, before
 being applied for real.
 
+`0010_deploy_pipeline.sql` (Phase 5.1/5.2/5.5) is written and reviewed but
+**not yet applied** to the live project — no live Supabase project was
+available in the environment this was built in to apply and verify it
+against the same way `0008`/`0009` were. Run it the same way as the rest,
+below, once you're ready.
+
 Run the files in this folder **in numeric order**, against your Supabase project's
 Postgres database. Two ways to do it — pick whichever you're comfortable with:
 
@@ -19,7 +25,8 @@ Postgres database. Two ways to do it — pick whichever you're comfortable with:
 2. Paste the contents of `0001_extensions.sql`, run it.
 3. Repeat for `0002_connections.sql`, `0003_vault_helpers.sql`, `0004_projects.sql`,
    `0005_sessions.sql`, `0006_workspace_tools.sql`, `0007_memory_and_project_knowledge.sql`,
-   `0008_connector_oauth_client.sql`, `0009_scheduling.sql`, in that order.
+   `0008_connector_oauth_client.sql`, `0009_scheduling.sql`, `0010_deploy_pipeline.sql`,
+   in that order.
 
 **Option B — Supabase CLI**
 ```bash
@@ -50,11 +57,14 @@ string → URI, in your Supabase dashboard.)
   `trigger`/`schedule_id` columns to `0005`'s `sessions` table (the second of
   those two references `project_schedules`, created earlier in this same file)
   — needs `0004` and `0005` to already exist.
+- `0010` (Phase 5.1/5.2/5.5) creates `deploy_runs` (references `projects`) and
+  adds `repo_origin`/`deploy_targets_confirmed` columns to `0004`'s `projects`
+  table — needs `0004` to already exist, nothing else depends on it.
 
 ## Verifying it worked
-After running all nine, `select table_name from information_schema.tables where
+After running all ten, `select table_name from information_schema.tables where
 table_schema = 'public' order by 1;` should list: `approval_requests`,
-`build_user_memory`, `checkpoints`, `github_credentials`, `llm_credentials`,
+`build_user_memory`, `checkpoints`, `deploy_runs`, `github_credentials`, `llm_credentials`,
 `mcp_servers`, `mcp_tool_overrides`, `project_knowledge`, `project_mcp_access`,
 `project_memory`, `project_memory_log`, `project_schedules`, `project_secrets`,
 `project_workspaces`, `projects`, `session_events`, `sessions`, `audit_log`.
@@ -62,7 +72,9 @@ table_schema = 'public' order by 1;` should list: `approval_requests`,
 'mcp_servers';` should additionally list `oauth_client_id` and
 `oauth_client_secret_ref`. `select column_name from information_schema.columns
 where table_name = 'sessions';` should additionally list `trigger` and
-`schedule_id`.
+`schedule_id`. `select column_name from information_schema.columns where
+table_name = 'projects';` should additionally list `repo_origin` and
+`deploy_targets_confirmed`.
 
 See `/docs/YOUR_SETUP_CHECKLIST.md` for the rest of the Supabase setup (Vault,
 service role key, JWT secret, RLS live-test).

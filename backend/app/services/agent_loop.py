@@ -76,6 +76,7 @@ from dataclasses import dataclass
 from app.repositories import approval_requests as approval_requests_repo
 from app.repositories import audit as audit_repo
 from app.repositories import build_user_memory as build_user_memory_repo
+from app.repositories import deploy_runs as deploy_runs_repo
 from app.repositories import mcp_servers as mcp_servers_repo
 from app.repositories import project_knowledge as project_knowledge_repo
 from app.repositories import project_memory as project_memory_repo
@@ -965,6 +966,9 @@ async def _run_inner(session_id: str, user_id: str) -> None:
             repo_context=repo_context,
             current_datetime=system_prompt.format_current_datetime(datetime.datetime.now(datetime.timezone.utc)),
             current_plan=system_prompt.format_current_plan(session.get("plan") or []),
+            last_deploy_diagnosis=system_prompt.format_last_deploy_diagnosis(
+                await deploy_runs_repo.get_latest_for_project(project["id"])
+            ),
             project_secrets=system_prompt.format_project_secrets(secret_names),
             project_knowledge=system_prompt.format_project_knowledge(
                 [{"name": n.name, "body": n.body} for n in all_triggered_knowledge]
