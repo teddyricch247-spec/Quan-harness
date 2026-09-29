@@ -10,7 +10,7 @@ reality when you get a chance, don't trust them blindly.
 
 - **Frontend:** Vercel project `quan-harness` → `frontend/` — https://quan-harness-teddyricch247-specs-projects.vercel.app
 - **Backend:** Render web service `Quan-harness` (Python) → `backend/` — https://quan-harness.onrender.com
-- **Database/Auth:** Supabase project `quan-harness` (`skyykzpamsvfjnnbcgjn.supabase.co`, eu-west-1). Migrations `0001` through `0009_scheduling.sql` are all applied as of 2026-09-27 — confirmed against `information_schema.columns`/`pg_policies`, not assumed. `0009` (Phase 4.5) was dry-run first (the full DDL plus explicit positive/negative tests of both new CHECK constraints, the `sessions.trigger` default, and `schedule_id`'s `ON DELETE SET NULL` behavior, all inside a transaction that was rolled back) before being applied for real via the Supabase MCP connector. `0010_deploy_pipeline.sql` (Phase 5.1/5.2/5.5) is written and reviewed but **not yet applied** — no live Supabase project was available in the environment this was built in; see `db/migrations/README.md`.
+- **Database/Auth:** Supabase project `quan-harness` (`skyykzpamsvfjnnbcgjn.supabase.co`, eu-west-1). Migrations `0001` through `0010_deploy_pipeline.sql` are all applied as of 2026-09-29 — confirmed against `information_schema.columns`/`pg_policies`, not assumed. `0009` (Phase 4.5) was dry-run first (the full DDL plus explicit positive/negative tests of both new CHECK constraints, the `sessions.trigger` default, and `schedule_id`'s `ON DELETE SET NULL` behavior, all inside a transaction that was rolled back) before being applied for real via the Supabase MCP connector. `0010_deploy_pipeline.sql` (Phase 5.1/5.2/5.5) was applied and verified on 2026-09-29 (schema, constraints, RLS and cascade all checked against the live project) — see `db/migrations/README.md`.
 - The previous Render service, Vercel env vars, and Supabase project (an older, schema-incompatible "harness" project) were all deleted and recreated from scratch on 2026-09-20/21. Don't trust anything in chat history or docs dated before that as still being live.
 
 ## Most recent change: Phase 5.1/5.2/5.5 Deploy Pipeline, Monorepos & Failure Handling (2026-09-29)
@@ -19,10 +19,9 @@ reality when you get a chance, don't trust them blindly.
 The headline items:
 
 1. New migration `0010_deploy_pipeline.sql` — a `deploy_runs` table, plus
-   `repo_origin`/`deploy_targets_confirmed` columns on `projects`. **Written
-   and reviewed but not yet applied to the live Supabase project** (see the
-   Live infra note above and `db/migrations/README.md`) — no live project
-   was available in the environment this was built in.
+   `repo_origin`/`deploy_targets_confirmed` columns on `projects`. **Applied
+   and verified on the live Supabase project on 2026-09-29** (see
+   `db/migrations/README.md`).
 2. A real deploy pipeline (`app/services/deploy_pipeline.py`): stack
    detection (Nixpacks' own rule order, with a tool-less LLM call as
    fallback), monorepo root detection/confirmation for imported repos only,

@@ -460,7 +460,7 @@ class DeployTriggerResult(BaseModel):
 
 
 class DeployNeedsConfirmationResult(BaseModel):
-    """The 409-shaped response §23.6's monorepo detection returns instead of
+    """The response (HTTP 200, not an error status) §23.6's monorepo detection returns instead of
     starting a deploy — same "needs_confirmation" shape PullResult already
     established for the same reason (an action that can't proceed without
     the person's own input isn't a plain error)."""

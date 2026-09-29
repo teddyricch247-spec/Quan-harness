@@ -5,6 +5,8 @@ the child table" rather than a single joined query, kept consistent with
 every other repository in this codebase for the same §5 defense-in-depth
 reasoning (RLS is bypassed by the service-role client this file uses; this
 explicit check is the real boundary)."""
+from datetime import datetime, timezone
+
 from starlette.concurrency import run_in_threadpool
 
 from app.db import get_service_client
@@ -113,5 +115,31 @@ async def has_running(project_id: str) -> bool:
             .data
         )
         return bool(rows)
+
+    return await run_in_threadpool(_call)
+
+
+async def fail_orphaned_running(project_id: str, message: str) -> int:
+    """Marks every still-'running' row of this project as failed, with
+    `message` as its stderr. Called (a) at the start of every deploy, where the
+    in-memory single-process guard has already established nothing is actually
+    running, so any 'running' row was orphaned by a restart or crash, and
+    (b) from the pipeline's own catch-all when it crashes mid-run. Without it
+    such a row stays 'running' forever and the UI polls it forever. Returns how
+    many rows were closed. failure_class is left null on purpose — an
+    interrupted run isn't a build or environment diagnosis, and must never
+    look like a fixable code bug."""
+    client = get_service_client()
+
+    def _call():
+        rows = (
+            client.table(TABLE)
+            .update({"status": "failed", "stderr": message, "completed_at": datetime.now(timezone.utc).isoformat()})
+            .eq("project_id", project_id)
+            .eq("status", "running")
+            .execute()
+            .data
+        )
+        return len(rows or [])
 
     return await run_in_threadpool(_call)

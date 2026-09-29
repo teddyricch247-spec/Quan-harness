@@ -61,6 +61,7 @@ _MONOREPO_MARKER_FILES = ("turbo.json", "nx.json", "pnpm-workspace.yaml")
 _ROOT_MARKER_FILES = ("package.json", "requirements.txt", "Dockerfile")
 
 _DEFAULT_NEXT_PORT = 3000
+_DEFAULT_NODE_PORT = 3000
 _DEFAULT_PYTHON_PORT = 8000
 
 _PROCFILE_WEB_RE = re.compile(r"^web:\s*(.+)$", re.MULTILINE)
@@ -197,7 +198,7 @@ def _detect_node_stack(scan: dict) -> StackDetectionResult | None:
         return None
     build_cmd = f"{install} && {_run_script(install, 'build')}" if "build" in scripts else install
     run_cmd = "npm start" if install.startswith("npm") else _run_script(install, "start")
-    return StackDetectionResult(stack="node", build_cmd=build_cmd, run_cmd=run_cmd, port=None)
+    return StackDetectionResult(stack="node", build_cmd=build_cmd, run_cmd=run_cmd, port=_DEFAULT_NODE_PORT)
 
 
 def _detect_python_stack(scan: dict) -> StackDetectionResult | None:

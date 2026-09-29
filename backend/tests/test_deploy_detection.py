@@ -52,7 +52,9 @@ def test_generic_node_with_start_script_detected():
     result = detect_stack_from_rules(scan)
     assert result.stack == "node"
     assert result.run_cmd == "npm start"
-    assert result.port is None  # §23.5's own "all or nothing" rule doesn't guess a port for generic Node
+    # Generic Node gets the same default port Next does: the pipeline injects it as $PORT and
+    # Live Preview needs a concrete port to proxy to, so "no port" was never a usable answer.
+    assert result.port == 3000
 
 
 def test_generic_node_without_start_script_returns_none_all_or_nothing():

@@ -27,7 +27,8 @@ from app.models.schemas import (
 )
 from app.repositories import deploy_runs as deploy_runs_repo
 from app.repositories import projects as projects_repo
-from app.services import deploy_pipeline
+from app.services import deploy_detection, deploy_pipeline, llm_client
+from app.services.workspace_paths import resolve_repo_path
 
 router = APIRouter(prefix="/projects", tags=["deploy"])
 
@@ -77,6 +78,12 @@ async def trigger_deploy(project_id: str, body: DeployTriggerRequest = DeployTri
         started = await deploy_pipeline.start_deploy(project_id, user.user_id, force_redetect=body.force_redetect)
     except deploy_pipeline.DeployNeedsConfirmation as exc:
         return DeployNeedsConfirmationResult(proposed_targets=[DeployTarget(**t) for t in exc.proposed_targets])
+    except llm_client.NoLlmCredentialError as exc:
+        raise HTTPException(status_code=400, detail=f"Couldn't work out this repository's deployable roots: {exc}")
+    except llm_client.LlmCallFailedError as exc:
+        raise HTTPException(status_code=502, detail=f"Couldn't work out this repository's deployable roots: the model call failed ({exc}).")
+    except deploy_detection.DetectionLlmError as exc:
+        raise HTTPException(status_code=422, detail=f"Couldn't work out this repository's deployable roots: {exc} Enter them manually and confirm.")
     if not started:
         raise HTTPException(status_code=409, detail="A deploy is already in progress for this project.")
     return DeployTriggerResult(status="running")
@@ -86,10 +93,18 @@ async def trigger_deploy(project_id: str, body: DeployTriggerRequest = DeployTri
 async def confirm_deploy_targets(project_id: str, body: DeployTargetsConfirmRequest, user: AuthedUser = Depends(verified_user)):
     await _require_project(user, project_id)
     for target in body.targets:
+        if not isinstance(target, dict):
+            raise HTTPException(status_code=422, detail="Every target must be an object with 'name' and 'root'.")
         if not isinstance(target.get("name"), str) or not target["name"].strip():
             raise HTTPException(status_code=422, detail="Every target needs a non-empty 'name'.")
         if not isinstance(target.get("root"), str) or not target["root"].strip():
             raise HTTPException(status_code=422, detail="Every target needs a non-empty 'root'.")
+        try:
+            resolve_repo_path(target["root"].strip())
+        except ValueError as exc:
+            # Reject here rather than letting a bad root blow up later inside the
+            # background deploy task, where there's nobody to return an error to.
+            raise HTTPException(status_code=422, detail=f"Invalid root '{target['root']}': {exc}")
     names = [t["name"].strip() for t in body.targets]
     if len(names) != len(set(names)):
         raise HTTPException(status_code=422, detail="Target names must be unique.")

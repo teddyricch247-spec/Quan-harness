@@ -37,7 +37,7 @@ nothing here assumes they exist yet.
 - A real bug fix in `guard_rules.py` (see "Gap found while auditing" below).
 - `backend/tests/test_deploy_detection.py` (30 tests),
   `backend/tests/test_deploy_diagnosis.py` (13 tests),
-  `backend/tests/test_deploy_pipeline.py` (10 tests) — all passing.
+  `backend/tests/test_deploy_pipeline.py` (17 tests) — all passing.
 
 ## Design decisions the sub-prompt's own text doesn't spell out
 
@@ -162,8 +162,8 @@ the real, current path instead of the stale one.
 
 ## Rough edges / known gaps
 
-- **No live Sprite, LLM credential, or Supabase project was available in
-  this environment to run any of this against** — same "ROUGH EDGE" honesty
+- **No live Sprite or LLM credential was available to run any of this
+  against** (the Supabase project *was* reachable in the later review pass — see below) — same "ROUGH EDGE" honesty
   `workspace_service.py`/`llm_client.py` already carry for their own pieces.
   Everything pure (`deploy_detection.py`, `deploy_diagnosis.py`'s parsing)
   is unit-tested and passing. `deploy_pipeline.py`'s orchestration is tested
@@ -171,9 +171,10 @@ the real, current path instead of the stale one.
   by an in-memory double, same convention as `test_agent_loop_audit.py` — it
   has **not** been run against a real Sprite. Two things in particular are
   worth verifying against one before trusting this in production:
-  - Whether `nohup ... & echo $! > pidfile` really does survive past the
-    single `sprite.run()` call that launched it, the way it would over a
-    real SSH connection. This is standard Unix process-detachment behavior
+  - Whether the detached launch (`nohup setsid bash -c ... &`) really does
+    survive past the single `sprite.run()` call that launched it, the way it
+    would over a real SSH connection. (The launch script itself *was* executed
+    for real in a local bash during review — see below — but not on a Sprite.) This is standard Unix process-detachment behavior
     and should hold, but "should" isn't "verified here."
   - Real request/response shapes from each of the two tool-less LLM fallback
     calls against a real Anthropic/OpenAI/Google/OpenRouter credential — the
@@ -244,6 +245,66 @@ function in this environment (no `pytest` available here — no network to
 install it) and every test passes. They should also just work under a real
 `pytest` in CI without modification — same import style every other pure-
 logic test file in this suite already uses.
+
+## Review pass (2026-09-29) — bugs found and fixed after the first delivery
+
+An independent review of the delivered code found these; all are fixed and
+covered by new tests in `test_deploy_pipeline.py`.
+
+1. **A crashed/interrupted deploy could leave its run `running` forever, and
+   that permanently blocked the project from deploying** (`has_running` saw the
+   stale row → 409 on every later attempt). Any exception outside the few
+   caught types (a Sprite call failing, a bad root, a DB error) or a backend
+   restart did this. Now: the in-memory single-process guard is the source of
+   truth, orphaned `running` rows are closed out at the start of each deploy
+   (`deploy_runs_repo.fail_orphaned_running`), and `_run_deploy` has a
+   catch-all that marks the run failed. The slot is also claimed before the
+   first `await`, so a double click can't start two deploys.
+2. **Raw log was not shown "immediately" (§23.9 point 1).** `_fail_run` wrote
+   stdout/stderr/exit code *together with* the diagnosis, after the LLM call —
+   and lost them entirely if that call raised an unanticipated exception.
+   Now the raw log is written and the run marked failed first; the diagnosis
+   is a second write. `DeployPanel.tsx` keeps polling ~90s after a failure so
+   the diagnosis appears on its own.
+3. **Exit code of a crashed app was wrong** (`wait` on a pid launched from a
+   different shell always fails → exit 127/None). The app now runs in a small
+   wrapper that records its own pid and real exit status. Also found by
+   executing the script in a real shell: a finished-but-unreaped process still
+   answers `kill -0`, which made a crashed app look healthy — the exit file is
+   now checked first.
+4. **Every redeploy of a running app would fail with "address already in
+   use".** A successful deploy keeps running on a fixed port and nothing
+   stopped it. The start script now stops the previous process group for the
+   same target first (pid/exit/log files are keyed by target name, not run id).
+5. `cd <root>` in the start script was unquoted (a root with a space broke it;
+   shell metacharacters were interpreted). Now quoted, and the confirm endpoint
+   validates each root with `resolve_repo_path` (422 instead of failing later
+   inside the background task).
+6. Root-detection LLM errors (`DetectionLlmError`, no credential, provider
+   failure) escaped `POST /deploy` as a 500; now 422/400/502 with a message.
+7. Generic Node projects got `port=None`, so `PORT` was never injected and
+   Live Preview would have had nothing to proxy to; they now default to 3000
+   like Next.
+8. Cosmetic: environment-class failures are labelled as such in the UI; the
+   `DeployNeedsConfirmationResult` docstring said "409-shaped" but it's a 200.
+
+**Still open — product decisions, deliberately not changed here:**
+
+- *Dockerfile handling vs. the prompt's §23.5 line "Dockerfile present → just
+  build it".* The delivered code treats any Dockerfile as the §23.6
+  nested-sandbox case and refuses to preview it. §23.6's sentence is about a
+  repo's *own runtime logic* spawning containers, not about a Dockerfile used
+  as a build recipe — so as built, an ordinary Python/Node app that merely
+  ships a Dockerfile can't be previewed at all. Decide whether Dockerfile repos
+  should instead fall through to Nixpacks-style detection (ignoring the
+  Dockerfile) and only declare nested-sandbox when the app itself needs Docker.
+- *§23.9 point 4's "routes to §23.8's notification system"* — there is no
+  notification system in this codebase yet, so environment failures are only
+  shown as a labelled diagnosis in the Deploy panel.
+- *Build-class "offer to fix"* is a Copy button, not a one-click "send to the
+  agent" action.
+- *From-scratch projects with several roots:* the harness never records the
+  roots it creates, so a scratch project always deploys as one root `.`.
 
 ## What's next
 

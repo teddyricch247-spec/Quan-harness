@@ -1,21 +1,19 @@
 # Running these migrations
 
-**Status as of 2026-09-27:** `0001` through `0009_scheduling.sql` are all
-applied to the live `quan-harness` Supabase project. `0008` and `0009` were
-both applied directly via the Supabase MCP connector rather than left for a
-human to run, and both verified afterward against
-`information_schema.columns`/`pg_policies` — not just assumed to have
-worked. `0009` (Phase 4.5) was additionally dry-run first: the full DDL plus
-explicit positive/negative tests of both new CHECK constraints, the
-`sessions.trigger` default, and `schedule_id`'s `ON DELETE SET NULL`
-behavior, all run inside a transaction that was then rolled back, before
-being applied for real.
-
-`0010_deploy_pipeline.sql` (Phase 5.1/5.2/5.5) is written and reviewed but
-**not yet applied** to the live project — no live Supabase project was
-available in the environment this was built in to apply and verify it
-against the same way `0008`/`0009` were. Run it the same way as the rest,
-below, once you're ready.
+**Status as of 2026-09-29:** `0001` through `0010_deploy_pipeline.sql` are all
+applied to the live `quan-harness` Supabase project. `0008`/`0009` were applied
+via the Supabase MCP connector on 2026-09-24/27 (`0008` is recorded there under
+the name `connector_oauth_client`). `0010` (Phase 5.1/5.2/5.5) was applied the
+same way on 2026-09-29 and then verified against the live database, not just
+assumed: `deploy_runs`'s columns/defaults, all four CHECK constraints, the
+`projects_repo_origin_check` constraint, the FK's `ON DELETE CASCADE`, the
+`(project_id, created_at desc)` index, RLS enabled with the one
+`deploy_runs_owner_all` policy — plus a functional test run inside a
+transaction that was rolled back (bad `status`/`failure_class`/`stack`/
+`repo_origin` values rejected, valid ones accepted, a second user sees 0 rows
+of another user's run while the owner sees 1, cascade delete works). The
+`projects` table had 0 rows at the time, so the `'scratch'` default for
+`repo_origin` backfilled nothing.
 
 Run the files in this folder **in numeric order**, against your Supabase project's
 Postgres database. Two ways to do it — pick whichever you're comfortable with:

@@ -51,6 +51,8 @@ for the fuller reasoning behind each:
     _start_and_probe's own docstring.
 """
 import asyncio
+import logging
+import re
 from datetime import datetime, timezone
 
 from app.repositories import deploy_runs as deploy_runs_repo
@@ -58,6 +60,8 @@ from app.repositories import projects as projects_repo
 from app.services import deploy_detection, deploy_diagnosis, llm_client, workspace_service
 from app.services.guard_rules import truncate_output
 from app.services.workspace_paths import REPO_ROOT, resolve_repo_path
+
+logger = logging.getLogger(__name__)
 
 BUILD_TIMEOUT_SECONDS = 300
 START_PROBE_TIMEOUT_SECONDS = 30
@@ -68,6 +72,10 @@ _NESTED_SANDBOX_MESSAGE = (
     "A Dockerfile was found, but Quan Harness's preview workspaces run on Fly.io Sprites, "
     "which don't support running a Docker build inside them. This isn't something you can "
     "fix from within the app's own code — the app itself is fine."
+)
+
+_ORPHANED_RUN_MESSAGE = (
+    "This deploy was interrupted before it finished (the backend restarted or hit an unexpected error)."
 )
 
 _subscribers: dict[str, list[asyncio.Queue]] = {}
@@ -120,32 +128,47 @@ async def start_deploy(project_id: str, user_id: str, force_redetect: bool = Fal
     invalidated) — that's a normal, expected flow branch, not an error path,
     which is why it's a distinct exception rather than folded into the
     boolean return."""
-    if is_running(project_id) or await deploy_runs_repo.has_running(project_id):
+    if is_running(project_id):
         return False
-
-    project = await projects_repo.get_by_id(project_id)
-    targets = project.get("deploy_targets") or []
-    confirmed = project.get("deploy_targets_confirmed", False)
-
-    if force_redetect:
-        confirmed = False
-        targets = []
-
-    if not confirmed:
-        if project.get("repo_origin") == "imported":
-            proposed = await _detect_roots(project_id)
-            proposed_dicts = [_blank_target(t.name, t.root) for t in proposed]
-            await projects_repo.set_deploy_targets(project_id, proposed_dicts, confirmed=False)
-            raise DeployNeedsConfirmation(proposed_dicts)
-        # 'scratch' origin: §23.6 — "there's nothing to detect ... no
-        # confirmation prompt is needed." Auto-resolve to the single implicit
-        # root and confirm immediately, no person-facing step at all.
-        targets = [_blank_target("app", ".")]
-        await projects_repo.set_deploy_targets(project_id, targets, confirmed=True)
-
+    # Claim the slot before the first await: two near-simultaneous requests
+    # (a double click) used to both pass the check above and both start a
+    # deploy, because the set was only added to after several awaits.
     _running_projects.add(project_id)
-    asyncio.create_task(_run_deploy(project_id, user_id, targets))
-    return True
+    launched = False
+    try:
+        # This backend is single-process (module docstring), so the in-memory
+        # set above is the source of truth for "is a deploy running". A row
+        # still marked 'running' in the database while nothing is running here
+        # was orphaned by a restart or an unhandled error — close it out now,
+        # otherwise it would block every future deploy of this project.
+        await deploy_runs_repo.fail_orphaned_running(project_id, _ORPHANED_RUN_MESSAGE)
+
+        project = await projects_repo.get_by_id(project_id)
+        targets = project.get("deploy_targets") or []
+        confirmed = project.get("deploy_targets_confirmed", False)
+
+        if force_redetect:
+            confirmed = False
+            targets = []
+
+        if not confirmed:
+            if project.get("repo_origin") == "imported":
+                proposed = await _detect_roots(project_id)
+                proposed_dicts = [_blank_target(t.name, t.root) for t in proposed]
+                await projects_repo.set_deploy_targets(project_id, proposed_dicts, confirmed=False)
+                raise DeployNeedsConfirmation(proposed_dicts)
+            # 'scratch' origin: §23.6 — "there's nothing to detect ... no
+            # confirmation prompt is needed." Auto-resolve to the single implicit
+            # root and confirm immediately, no person-facing step at all.
+            targets = [_blank_target("app", ".")]
+            await projects_repo.set_deploy_targets(project_id, targets, confirmed=True)
+
+        asyncio.create_task(_run_deploy(project_id, user_id, targets))
+        launched = True
+        return True
+    finally:
+        if not launched:
+            _running_projects.discard(project_id)
 
 
 async def confirm_targets(project_id: str, targets: list[dict]) -> list[dict]:
@@ -157,7 +180,7 @@ async def confirm_targets(project_id: str, targets: list[dict]) -> list[dict]:
     unchanged target silently would be a worse default than re-detecting it
     once on the next deploy (§23.5's rule-based path is cheap; the LLM
     fallback only fires when it has to)."""
-    blanked = [_blank_target(t["name"], t["root"]) for t in targets]
+    blanked = [_blank_target(t["name"].strip(), t["root"].strip()) for t in targets]
     await projects_repo.set_deploy_targets(project_id, blanked, confirmed=True)
     return blanked
 
@@ -220,6 +243,13 @@ async def _run_deploy(project_id: str, user_id: str, targets: list[dict]) -> Non
             await projects_repo.set_deploy_targets(project_id, targets, confirmed=True)
 
         _broadcast(project_id, {"type": "__deploy_status__", "status": "completed" if overall_ok else "failed"})
+    except Exception as exc:  # noqa: BLE001 — anything unexpected must still close out the run row
+        logger.exception("Deploy pipeline crashed for project %s", project_id)
+        try:
+            await deploy_runs_repo.fail_orphaned_running(project_id, f"Deploy pipeline error: {exc}")
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not mark the crashed deploy run as failed for project %s", project_id)
+        _broadcast(project_id, {"type": "__deploy_status__", "status": "failed"})
     finally:
         _running_projects.discard(project_id)
 
@@ -307,7 +337,7 @@ async def _deploy_one_target(project: dict, user_id: str, target: dict, extra_en
         await deploy_runs_repo.update(run_row["id"], {"stdout": stdout, "stderr": stderr})
 
     _broadcast(project_id, {"type": "phase", "run_id": run_row["id"], "target_name": target_name, "phase": "start", "status": "running"})
-    started, run_stdout, run_stderr, exit_code = await _start_and_probe(project_id, cwd, detection.run_cmd, env_prefix, run_row["id"])
+    started, run_stdout, run_stderr, exit_code = await _start_and_probe(project_id, cwd, detection.run_cmd, env_prefix, target["name"])
     if not started:
         await _fail_run(project, run_row["id"], "start", detection.build_cmd, detection.run_cmd, run_stdout, run_stderr, exit_code)
         _broadcast(project_id, {"type": "phase", "run_id": run_row["id"], "target_name": target_name, "phase": "start", "status": "failed"})
@@ -337,21 +367,33 @@ async def _resolve_stack(project: dict, target: dict, scan: dict) -> deploy_dete
 
 
 async def _fail_run(project: dict, run_id: str, phase: str, build_cmd, run_cmd, stdout: str, stderr: str, exit_code) -> None:
-    """§23.9 point 1 (raw log, already true by the time this is called — the
-    caller already wrote stdout/stderr/exit_code) then point 2 (a best-effort
-    diagnosis on top of it — see deploy_diagnosis.py's own docstring for why
-    a failed diagnosis call must never block this from marking the run
-    failed with what it already has)."""
-    fields: dict = {"status": "failed", "phase": phase, "exit_code": exit_code, "stdout": stdout, "stderr": stderr, "completed_at": _now_iso()}
+    """§23.9 point 1 then point 2, in that order and as two separate writes:
+    the raw stdout/stderr/exit_code is saved (and the run marked failed) FIRST,
+    so the Console tab shows it immediately; the tool-less diagnosis call
+    happens afterwards and lands on the same row when it finishes. Writing
+    both in one update after the LLM call — as this used to — meant the raw log
+    stayed invisible for as long as the diagnosis took, and was lost with it if
+    that call raised something unexpected. See deploy_diagnosis.py's own
+    docstring for why a failed diagnosis must never take the raw log with it."""
+    await deploy_runs_repo.update(
+        run_id,
+        {"status": "failed", "phase": phase, "exit_code": exit_code, "stdout": stdout, "stderr": stderr, "completed_at": _now_iso()},
+    )
     try:
         credential = await llm_client.resolve_credential(project)
         diagnosis = await deploy_diagnosis.diagnose(phase, build_cmd, run_cmd, stdout, stderr, exit_code, credential)
-        fields["failure_class"] = diagnosis.failure_class
-        fields["diagnosis_text"] = diagnosis.diagnosis_text
-        fields["suggested_fix_prompt"] = diagnosis.suggested_fix_prompt
+        await deploy_runs_repo.update(
+            run_id,
+            {
+                "failure_class": diagnosis.failure_class,
+                "diagnosis_text": diagnosis.diagnosis_text,
+                "suggested_fix_prompt": diagnosis.suggested_fix_prompt,
+            },
+        )
     except (llm_client.NoLlmCredentialError, llm_client.LlmCallFailedError, deploy_diagnosis.DiagnosisLlmError):
         pass  # best-effort — the raw log above is already saved regardless
-    await deploy_runs_repo.update(run_id, fields)
+    except Exception:  # noqa: BLE001 — diagnosis is never allowed to fail the deploy itself
+        logger.exception("Deploy diagnosis crashed for run %s", run_id)
 
 
 # ---------------------------------------------------------------------------
@@ -438,34 +480,59 @@ def _shell_quote(value: str) -> str:
     return "'" + value.replace("'", "'\\''") + "'"
 
 
-async def _start_and_probe(project_id: str, target_dir: str, run_cmd: str, env_prefix: str, run_id: str) -> tuple[bool, str, str, int | None]:
-    """Launches run_cmd detached (nohup, backgrounded, disowned from the
-    shell exec_in_workspace itself runs), waits PROBE_SECONDS, then checks
-    whether the process is still alive. "Still alive after a few seconds" —
-    not an HTTP health check against the detected port — is the health
-    signal (module docstring): a process that's still running is evidence
-    the app didn't crash on startup (a missing dependency, a bad config
-    read, a syntax error the build step's own language didn't catch), which
-    is what this phase exists to catch; whether it's *also* correctly
-    serving HTTP yet is a separate, later concern (§23's Live Preview /
-    proxying, out of scope here).
+def _slot_slug(target_name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_-]", "_", target_name.strip()) or "app"
 
-    One exec_in_workspace call does the launch, the sleep, the aliveness
-    check, and the log tail together — same "one round trip" cost-
-    consciousness as run_lint/repo_map's own combined scripts. The exec
-    call's own `cwd` is REPO_ROOT regardless of `target_dir` — the script
-    does its own `cd` into target_dir before launching, so the top-level
-    exec cwd is just a neutral starting point."""
-    log_path = f"/tmp/qh-deploy-{run_id}.log"
-    pid_path = f"/tmp/qh-deploy-{run_id}.pid"
+
+async def _start_and_probe(project_id: str, target_dir: str, run_cmd: str, env_prefix: str, target_name: str) -> tuple[bool, str, str, int | None]:
+    """Launches run_cmd detached, waits PROBE_SECONDS, then checks whether the
+    process is still alive. "Still alive after a few seconds" — not an HTTP
+    health check against the detected port — is the health signal (module
+    docstring): a process that's still running is evidence the app didn't crash
+    on startup (a missing dependency, a bad config read, a syntax error the
+    build step's own language didn't catch), which is what this phase exists to
+    catch; whether it's *also* correctly serving HTTP yet is a separate, later
+    concern (§23's Live Preview / proxying, out of scope here).
+
+    Three things this handles that a plain `nohup ... &` does not:
+      - A previous deploy of the same target is still running (a successful
+        deploy is meant to keep running) and holds the same fixed port. It is
+        stopped first (its whole process group), otherwise every redeploy would
+        die with "address already in use". The pid/exit/log files are keyed by
+        target name, not run id, so the next deploy can find the last one.
+      - The real exit code. The app runs inside a small wrapper shell that
+        records its own pid and, when the app exits, its exit status; `wait`
+        can't do this from a different shell than the one that launched it.
+        The exit file is checked BEFORE `kill -0`: an exited-but-unreaped
+        process (a zombie) still answers `kill -0`, which made a crashed app
+        look healthy when this was tested in a real shell.
+      - `target_dir` is shell-quoted, so a root with a space or shell
+        metacharacter can't break or alter the launch script.
+
+    One exec_in_workspace call does the stop, launch, sleep, aliveness check and
+    log tail together — same "one round trip" cost-consciousness as
+    run_lint/repo_map's own combined scripts. The exec call's own `cwd` is
+    REPO_ROOT regardless of `target_dir`; the script `cd`s itself."""
+    slug = _slot_slug(target_name)
+    pid_path = f"/tmp/qh-deploy-{slug}.pid"
+    exit_path = f"/tmp/qh-deploy-{slug}.exit"
+    log_path = f"/tmp/qh-deploy-{slug}.log"
+    wrapper = f"echo $$ > {pid_path}; {env_prefix}bash -c {_shell_quote(run_cmd)}; echo $? > {exit_path}"
     script = (
-        f"cd {target_dir} && "
-        f"({env_prefix}nohup bash -c {_shell_quote(run_cmd)} > {log_path} 2>&1 & echo $! > {pid_path}) ; "
+        f"if [ -f {pid_path} ]; then "
+        f"kill -- -$(cat {pid_path}) 2>/dev/null; kill $(cat {pid_path}) 2>/dev/null; sleep 1; "
+        f"fi; "
+        f"rm -f {pid_path} {exit_path}; "
+        f"SETSID=$(command -v setsid || true); "
+        f"cd {_shell_quote(target_dir)} && "
+        f"(nohup $SETSID bash -c {_shell_quote(wrapper)} > {log_path} 2>&1 &) ; "
         f"sleep {PROBE_SECONDS} ; "
-        f"if kill -0 $(cat {pid_path}) 2>/dev/null; then "
+        f"if [ -f {exit_path} ]; then "
+        f'  echo "QH_EXIT_CODE:$(cat {exit_path})"; '
+        f"elif [ -f {pid_path} ] && kill -0 $(cat {pid_path}) 2>/dev/null; then "
         f'  echo "QH_STILL_RUNNING"; '
         f"else "
-        f'  wait $(cat {pid_path}) 2>/dev/null; echo "QH_EXIT_CODE:$?"; '
+        f'  echo "QH_EXIT_CODE:"; '
         f"fi; "
         f"echo '---QH_LOG---'; cat {log_path} 2>/dev/null"
     )

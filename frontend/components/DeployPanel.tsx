@@ -15,6 +15,7 @@ import { DeployNeedsConfirmationResult, DeployRun, DeployTarget, DeployTriggerRe
 // natural upgrade path once the chat transcript UI takes on the same
 // problem for the agent stream — see /docs/PHASE5_1_5_2_5_5_NOTES.md.
 const POLL_MS = 2000;
+const DIAGNOSIS_WAIT_MS = 90_000;
 
 const PHASE_LABEL: Record<DeployRun["phase"], string> = {
   detect: "Detecting stack…",
@@ -46,7 +47,17 @@ export default function DeployPanel({ project, onProjectChanged }: { project: Pr
   const latest = runs[0] ?? null;
 
   useEffect(() => {
-    const anyRunning = runs.some((r) => r.status === "running");
+    // The raw log lands the moment a run fails; the diagnosis is written a few
+    // seconds later (§23.9 point 2). Keep polling briefly after a failure so it
+    // shows up on its own — but stop after DIAGNOSIS_WAIT_MS, since a diagnosis
+    // can legitimately never arrive (no LLM credential, provider down).
+    const diagnosisPending =
+      !!latest &&
+      latest.status === "failed" &&
+      !latest.diagnosis_text &&
+      !!latest.completed_at &&
+      Date.now() - new Date(latest.completed_at).getTime() < DIAGNOSIS_WAIT_MS;
+    const anyRunning = runs.some((r) => r.status === "running") || diagnosisPending;
     if (anyRunning && !pollRef.current) {
       pollRef.current = setInterval(refreshRuns, POLL_MS);
     } else if (!anyRunning && pollRef.current) {
@@ -212,6 +223,11 @@ function RunStatus({ run }: { run: DeployRun }) {
 
       {run.status === "failed" && run.diagnosis_text && (
         <div className="border rounded p-3 mb-2 bg-neutral-50">
+          {run.failure_class === "environment" && (
+            <p className="text-xs font-medium text-amber-800 mb-1">
+              Environment issue — not a code bug, so there is nothing for the agent to fix here.
+            </p>
+          )}
           <p className="mb-2">{run.diagnosis_text}</p>
           {run.suggested_fix_prompt && (
             <div className="flex items-start gap-2">
