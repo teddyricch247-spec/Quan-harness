@@ -102,6 +102,8 @@ export interface DeployRun {
   stdout: string;
   stderr: string;
   failure_class: "build" | "environment" | null;
+  // Phase 5.4 — which §23.8 limitation an environment failure looks like.
+  environment_kind: PreviewKind | null;
   diagnosis_text: string | null;
   suggested_fix_prompt: string | null;
   created_at: string;
@@ -212,4 +214,76 @@ export interface ProjectSchedule {
   last_session_id: string | null;
   created_at: string;
   updated_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// Live Preview (§23.7) and known preview limitations (§23.8) — Phase 5.3 / 5.4
+// ---------------------------------------------------------------------------
+
+export type PreviewKind = "cors" | "secrets" | "oauth" | "database" | "nested_container" | "other";
+
+export interface PreviewStatus {
+  configured: boolean; // does the server have PREVIEW_BASE_DOMAIN + PREVIEW_SIGNING_SECRET
+  can_open: boolean;
+  unavailable_reason: string | null;
+  subdomain: string | null;
+  // The stable preview origin — the one address a client allowlists for CORS, once (§23.8).
+  origin: string | null;
+  // 'running' is the only billed state (§23.7).
+  billing_state: "running" | "warm" | "cold" | null;
+  entry_target: string | null;
+  deployed: boolean;
+}
+
+export interface PreviewSession {
+  url: string; // single-use, short-lived — load it in the iframe once
+  expires_in_seconds: number;
+}
+
+export interface PreviewRestartResult {
+  results: { target: string; started: boolean; exit_code: number | null; log: string }[];
+}
+
+// Name, an optional hint, timestamps. The API never returns a value.
+export interface PreviewSecret {
+  id: string;
+  name: string;
+  value_hint: string | null;
+  created_at: string;
+  updated_at: string;
+  created?: boolean | null;
+}
+
+export interface GuidanceOption {
+  label: string;
+  detail: string;
+  // A label for a button the PERSON clicks. Never something the harness performs for them (§23.8).
+  action: "copy_origin" | "copy_ips" | "open_secrets" | null;
+}
+
+export interface Guidance {
+  kind: string;
+  title: string;
+  can_fix: "yes" | "partly" | "no";
+  why: string;
+  options: GuidanceOption[];
+}
+
+export interface PreviewNotification {
+  id: string;
+  kind: PreviewKind;
+  status: "open" | "dismissed" | "resolved";
+  source: string;
+  title: string;
+  body: string;
+  detail: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+  guidance: Guidance;
+}
+
+export interface PreviewLimitations {
+  origin: string | null;
+  egress_ips: string[];
+  guidance: Guidance[];
 }

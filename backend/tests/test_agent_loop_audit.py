@@ -73,7 +73,9 @@ def _world(sink: _AuditSink, overrides: dict | None = None):
         ("shell_tools", "run_tests"): mock.AsyncMock(return_value=shell_tools.BashResult(executed=True, exit_code=1)),
         ("shell_tools", "execute_bash"): mock.AsyncMock(return_value=shell_tools.BashResult(executed=True, exit_code=0)),
         ("sessions", "update_fields"): mock.AsyncMock(side_effect=lambda session_id, fields: {"plan": fields["plan"]}),
-        ("mcp_tools", "call_tool"): mock.AsyncMock(return_value=SimpleNamespace(ok=True, content="done", error=None)),
+        ("mcp_tools", "call_tool"): mock.AsyncMock(return_value=SimpleNamespace(ok=True, content="done", error=None, status_code=None)),
+        # Phase 5.4: _execute_call now redacts preview-secret values. Default: the project has none.
+        ("preview_secrets", "get_redaction_values"): mock.AsyncMock(return_value={}),
     }
     doubles.update(overrides or {})
     targets = {
@@ -82,6 +84,7 @@ def _world(sink: _AuditSink, overrides: dict | None = None):
         "shell_tools": shell_tools,
         "sessions": agent_loop.sessions_repo,
         "mcp_tools": mcp_tools,
+        "preview_secrets": agent_loop.preview_secrets_service,
     }
     patches = [mock.patch.object(targets[owner], attr, double) for (owner, attr), double in doubles.items()]
     patches.append(mock.patch("app.services.vault.read_secret", mock.AsyncMock(return_value="TOKEN")))

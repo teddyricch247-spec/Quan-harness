@@ -100,3 +100,36 @@ def test_prompt_includes_stdout_and_stderr():
     prompt = build_diagnosis_prompt("build", "x", None, "hello from stdout", "boom from stderr", 1)
     assert "hello from stdout" in prompt
     assert "boom from stderr" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Phase 5.4 — environment_kind, which §23.8 limitation an environment failure looks like
+# ---------------------------------------------------------------------------
+
+
+def test_environment_failures_carry_a_recognised_kind():
+    for kind in ("secrets", "cors", "oauth", "database", "other"):
+        d = parse_diagnosis_response(
+            f'{{"diagnosis": "x", "failure_class": "environment", "environment_kind": "{kind}", "suggested_fix_prompt": null}}'
+        )
+        assert d.environment_kind == kind
+
+
+def test_an_unrecognised_or_missing_kind_on_an_environment_failure_becomes_other_not_an_error():
+    # The extra field is lenient on purpose: a model that classified the failure correctly but
+    # fumbled this field must not lose the whole diagnosis.
+    for payload in ('"environment_kind": "weird"', '"environment_kind": null', '"unrelated": 1'):
+        d = parse_diagnosis_response(f'{{"diagnosis": "x", "failure_class": "environment", {payload}}}')
+        assert d.environment_kind == "other"
+
+
+def test_a_build_failure_never_has_a_kind_even_if_the_model_supplied_one():
+    d = parse_diagnosis_response('{"diagnosis": "x", "failure_class": "build", "environment_kind": "cors", "suggested_fix_prompt": "fix"}')
+    assert d.environment_kind is None and d.suggested_fix_prompt == "fix"
+
+
+def test_the_prompt_lists_every_kind_the_parser_accepts():
+    from app.services import deploy_diagnosis as dd
+
+    prompt = dd.build_diagnosis_prompt("start", None, "node x", "", "", 1)
+    assert all(f'"{k}"' in prompt for k in dd._ENVIRONMENT_KINDS)

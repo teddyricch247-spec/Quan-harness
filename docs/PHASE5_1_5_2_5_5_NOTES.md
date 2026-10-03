@@ -1,5 +1,13 @@
 # Phase 5.1/5.2/5.5 Notes — Deploy Pipeline, Monorepos & Failure Handling
 
+> **Update (Phase 5.3/5.4, 2026-10-02):** two decisions recorded below were revised.
+> (1) A Dockerfile no longer short-circuits to "nested container support" — that is now
+> declared only when a build/run *command* invokes Docker, or the daemon is unavailable.
+> (2) The app is started as a Sprite *service*, not a detached `nohup` (which died when
+> the Sprite hibernated). §23.9 point 4's notification routing is also now wired. See
+> `docs/PHASE5_3_5_4_NOTES.md`. The text below is left as originally written.
+
+
 Implements Combined Prompt A (§23.5 stack detection & build, §23.6 repo
 structure edge cases, §23.9 deploy failure handling) — Implementation Order
 step 16. Phases 1–4 were already complete going in. This does **not** cover

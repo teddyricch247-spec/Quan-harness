@@ -16,11 +16,17 @@ from app.services.deploy_detection import (
 # ---------------------------------------------------------------------------
 
 
-def test_dockerfile_short_circuits_before_any_other_rule():
+def test_a_dockerfile_no_longer_short_circuits_detection():
+    # Phase 5.3 correction: a Dockerfile merely existing is not §23.6's "the repo's own logic
+    # spins up Docker". It used to override every other rule (stack="dockerfile", nothing to
+    # run), which made any repo that ships one un-previewable. Detection now ignores it.
     scan = {"dockerfile": True, "package_json": '{"dependencies": {"next": "1.0.0"}}'}
     result = detect_stack_from_rules(scan)
-    assert result.stack == "dockerfile"
-    assert result.build_cmd is None and result.run_cmd is None and result.port is None
+    assert result.stack == "nextjs" and result.run_cmd and result.port == 3000
+
+
+def test_a_dockerfile_alone_falls_through_to_the_llm_fallback():
+    assert detect_stack_from_rules({"dockerfile": True, "top_level_files": ["Dockerfile"]}) is None
 
 
 def test_next_dependency_detected_with_default_port_and_dollar_port_run_cmd():

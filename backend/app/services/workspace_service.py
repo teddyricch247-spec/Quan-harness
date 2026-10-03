@@ -82,6 +82,9 @@ default. Worth knowing regardless, since this workspace holds a project's
 actual code: don't call update_sprite(..., url_settings=URLSettings(auth="public"))
 anywhere without meaning to.
 """
+import asyncio
+import inspect
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -203,12 +206,24 @@ async def wake(project_id: str) -> dict:
     )
 
 
-async def sleep(project_id: str) -> dict:
-    """No manual pause endpoint exists on Sprites (see module docstring) — this
-    can no longer command a stop the way it did against Fly Machines. Kept as
-    a function since nothing calls it today but §23.1 anticipated an idle
-    reaper eventually using it; for now it just refreshes billing_state from
-    the Sprite's own reported status rather than pretending to force one."""
+_BILLING_STATES = ("running", "warm", "cold")
+
+
+def map_billing_state(reported_status: object) -> str:
+    """project_workspaces.billing_state has a DB check constraint limiting it to
+    exactly 'running'/'warm'/'cold' (db/migrations/0004_projects.sql) — see the
+    module docstring's ROUGH EDGE note on why this doesn't write reported_status
+    through unvalidated. Anything unrecognised maps to 'running': the safe
+    direction for a billing display (over-report rather than imply "free")."""
+    return reported_status if reported_status in _BILLING_STATES else "running"  # type: ignore[return-value]
+
+
+async def refresh_billing_state(project_id: str) -> dict | None:
+    """Phase 5.3 (§23.7): re-reads the Sprite's own reported status and writes it
+    to billing_state. This is a metadata read against the Sprites API — it does
+    NOT wake the Sprite and is not traffic to the Sprite's URL, so polling it
+    can't itself keep a Sprite in the billed `running` state (the one thing
+    §23.7 says to get right). Never call exec_in_workspace for a status check."""
     workspace = await projects_repo.get_workspace(project_id)
     if workspace is None or workspace["sprite_handle"].startswith("pending-"):
         return workspace
@@ -218,13 +233,161 @@ async def sleep(project_id: str) -> dict:
             reported_status = sprite.status
         except Exception:  # noqa: BLE001 — a failed status check shouldn't crash the caller
             return workspace
+    return await projects_repo.update_workspace(project_id, {"billing_state": map_billing_state(reported_status)})
 
-    # project_workspaces.billing_state has a DB check constraint limiting it to
-    # exactly 'running'/'warm'/'cold' (db/migrations/0004_projects.sql) — see
-    # the module docstring's ROUGH EDGE note on why this doesn't write
-    # reported_status through unvalidated.
-    billing_state = reported_status if reported_status in ("running", "warm", "cold") else "running"
-    return await projects_repo.update_workspace(project_id, {"billing_state": billing_state})
+
+async def sleep(project_id: str) -> dict:
+    """No manual pause endpoint exists on Sprites (see module docstring) — this
+    can no longer command a stop the way it did against Fly Machines. Kept as
+    a function since nothing calls it today but §23.1 anticipated an idle
+    reaper eventually using it; for now it just refreshes billing_state from
+    the Sprite's own reported status rather than pretending to force one."""
+    return await refresh_billing_state(project_id)
+
+
+# ---------------------------------------------------------------------------
+# Phase 5.3 (§23.7) — preview plumbing: the Sprite's URL, and Services
+# ---------------------------------------------------------------------------
+#
+# Why Services, and not the detached `nohup ... &` Phase 5.1 launched the app
+# with: per docs.sprites.dev/working-with-sprites, a Sprite's *RAM does not
+# persist* — "running processes stop" when it hibernates (~30s after the last
+# activity), and only the filesystem survives. A process started through exec
+# therefore dies shortly after the deploy that started it, and a person opening
+# the preview a minute later would hit a Sprite that wakes up with nothing
+# listening. Services are the platform's own answer: "processes that auto-restart
+# whenever your Sprite wakes up", and a service can declare `http_port` so the
+# Sprite's URL routes to it.
+#
+# ROUGH EDGE (same honesty as the module docstring's): the Services calls below
+# are written against the sprites-py README (create_service(name, cmd=, args=,
+# http_port=, env=, dir=) — documented) but the *async* client's exact return
+# shape and the service-state fields were not verifiable offline. `_drain` accepts
+# either an async or a sync iterable of events, and every attribute read on a
+# returned object goes through getattr with a default, so an unexpected shape
+# degrades to "no events / unknown state" rather than a crash. Confirm against a
+# real account (docs/PHASE5_3_5_4_NOTES.md has the exact checks).
+
+SERVICE_LOG_DIR = "/.sprite/logs/services"
+
+
+class SpriteServiceError(RuntimeError):
+    pass
+
+
+@dataclass
+class SpriteInfo:
+    url: str | None
+    status: str | None
+    url_auth: str | None  # "sprite" (bearer-gated) | "public" | None if the SDK didn't report it
+
+
+async def _maybe_await(value):
+    return await value if inspect.isawaitable(value) else value
+
+
+async def _drain(stream, max_events: int = 200, max_seconds: float = 10.0) -> list[str]:
+    """Reads an event stream for at most `max_events` / `max_seconds`, returning
+    what arrived as short text lines. Accepts an async or a plain iterable; never
+    raises on a malformed event."""
+    lines: list[str] = []
+    deadline = time.monotonic() + max_seconds
+
+    def _text(event) -> str:
+        data = getattr(event, "data", None)
+        kind = getattr(event, "type", None)
+        text = str(data if data is not None else event)
+        return f"{kind}: {text}" if kind else text
+
+    if stream is None:
+        return lines
+    if hasattr(stream, "__aiter__"):
+        iterator = stream.__aiter__()
+        while len(lines) < max_events:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                event = await asyncio.wait_for(iterator.__anext__(), timeout=remaining)
+            except (StopAsyncIteration, asyncio.TimeoutError):
+                break
+            lines.append(_text(event))
+        return lines
+    if hasattr(stream, "__iter__"):
+        for event in stream:  # a plain iterable has already been fully produced
+            lines.append(_text(event))
+            if len(lines) >= max_events or time.monotonic() > deadline:
+                break
+    return lines
+
+
+async def get_sprite_info(project_id: str) -> SpriteInfo | None:
+    """Metadata only — an API read, not traffic to the Sprite, so it neither
+    wakes the Sprite nor holds a connection open (see refresh_billing_state)."""
+    workspace = await projects_repo.get_workspace(project_id)
+    if workspace is None or workspace["sprite_handle"].startswith("pending-"):
+        return None
+    async with _new_client() as client:
+        try:
+            sprite = await client.get_sprite(workspace["sprite_handle"])
+        except Exception as exc:  # noqa: BLE001
+            raise SpriteServiceError(f"Could not read Sprite {workspace['sprite_handle']}: {exc}") from exc
+    settings = getattr(sprite, "url_settings", None)
+    auth = settings.get("auth") if isinstance(settings, dict) else getattr(settings, "auth", None)
+    return SpriteInfo(url=getattr(sprite, "url", None), status=getattr(sprite, "status", None), url_auth=auth)
+
+
+async def create_or_replace_service(
+    project_id: str,
+    name: str,
+    *,
+    cmd: str,
+    args: list[str],
+    cwd: str,
+    env: dict[str, str],
+    http_port: int | None = None,
+    watch_seconds: float = 10.0,
+) -> list[str]:
+    """Creates the service, or replaces an existing one of the same name (which
+    restarts it with the new env). `env` is where preview secrets reach the app:
+    it travels in the API request body and becomes the service process's
+    environment — it is never part of any command line (`ps`/argv) the harness
+    builds, and never written to a file by this harness. Returns the startup
+    events as text lines."""
+    workspace = await ensure_workspace(project_id)
+    async with _new_client() as client:
+        sprite = client.sprite(workspace["sprite_handle"])
+        kwargs: dict = {"args": args, "env": env, "dir": cwd}
+        if http_port is not None:
+            kwargs["http_port"] = http_port
+        try:
+            stream = await _maybe_await(sprite.create_service(name, cmd=cmd, **kwargs))
+            return await _drain(stream, max_seconds=watch_seconds)
+        except Exception as exc:  # noqa: BLE001 — see ROUGH EDGE above
+            raise SpriteServiceError(f"Could not start service {name} on {workspace['sprite_handle']}: {_scrub(exc, env)}") from exc
+
+
+def _scrub(exc: Exception, env: dict[str, str]) -> str:
+    """An SDK/HTTP error string can echo the request it failed on — and that
+    request body contains the service env. Strip every value out before the
+    message goes anywhere (a raised error ends up in logs and deploy_runs)."""
+    from app.services.secret_redaction import redact
+
+    return redact(str(exc), env) or ""
+
+
+async def stop_service(project_id: str, name: str) -> None:
+    """Best-effort: used to stop a crash-looping service so it doesn't burn
+    compute after a failed deploy. Never raises."""
+    workspace = await projects_repo.get_workspace(project_id)
+    if workspace is None or workspace["sprite_handle"].startswith("pending-"):
+        return
+    async with _new_client() as client:
+        try:
+            sprite = client.sprite(workspace["sprite_handle"])
+            await _maybe_await(sprite.stop_service(name))
+        except Exception:  # noqa: BLE001
+            return
 
 
 async def exec_in_workspace(

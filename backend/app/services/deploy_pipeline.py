@@ -32,10 +32,22 @@ for the fuller reasoning behind each:
     Nixpacks' own general property, cited as the reason Nixpacks' detection
     *order* is worth following — it is not an instruction to build actual
     container images inside a Sprite. Sprites can't do that (§23.6's own
-    nested-sandboxing rule says so directly), so a detected Dockerfile is
-    handled as an immediate, deterministic §23.6 nested-sandboxing case —
-    detected *before* any build is attempted, never attempted and left to
-    fail — see _build_and_start's own Dockerfile branch below.
+    nested-sandboxing rule says so directly). §23.6 is specific about WHAT is
+    unsupported: "if the repo's own logic tries to spin up its own Docker/
+    sandbox inside the workspace's Sprite" — i.e. a build or start command that
+    invokes Docker. A Dockerfile merely *existing* in a repository is not that,
+    and Phase 5.1 originally treated it as that (any Dockerfile → immediate
+    nested-sandbox failure), which refused to preview every repo that ships
+    one for production use. Corrected in Phase 5.3/5.4: a Dockerfile is ignored
+    by detection, and nested-container support is declared only when the
+    detected/confirmed build or run command actually invokes docker/podman, or
+    when a log shows the Docker daemon being unavailable — see
+    preview_limitations.mentions_docker / classify_environment_issue.
+  - Phase 5.3: the app is started as a Sprite SERVICE, not a detached `nohup`
+    process — a Sprite's RAM doesn't persist across hibernation, so a `nohup`ed
+    app dies ~30s after the deploy that started it. See preview_runtime.py's
+    module docstring for the full reasoning, and for how preview secrets reach the
+    app (through the service's env only).
   - A monorepo target literally named "frontend" gets a `BACKEND_URL` env
     var pointing at a same-Sprite "backend" target's own resolved port
     (`http://127.0.0.1:<port>`) once that target is confirmed running — the
@@ -52,12 +64,20 @@ for the fuller reasoning behind each:
 """
 import asyncio
 import logging
-import re
 from datetime import datetime, timezone
 
 from app.repositories import deploy_runs as deploy_runs_repo
 from app.repositories import projects as projects_repo
-from app.services import deploy_detection, deploy_diagnosis, llm_client, workspace_service
+from app.services import (
+    deploy_detection,
+    deploy_diagnosis,
+    llm_client,
+    preview_limitations,
+    preview_notifications,
+    preview_runtime,
+    preview_secrets_service,
+    workspace_service,
+)
 from app.services.guard_rules import truncate_output
 from app.services.workspace_paths import REPO_ROOT, resolve_repo_path
 
@@ -69,9 +89,10 @@ PROBE_SECONDS = 5
 
 _NESTED_SANDBOX_MESSAGE = (
     "This app requires nested container support, which preview doesn't support yet. "
-    "A Dockerfile was found, but Quan Harness's preview workspaces run on Fly.io Sprites, "
-    "which don't support running a Docker build inside them. This isn't something you can "
-    "fix from within the app's own code — the app itself is fine."
+    "Its own build or start-up needs Docker, but Quan Harness's preview workspaces run on "
+    "Fly.io Sprites, which can't run containers inside them. This isn't something you can "
+    "fix from within the app's own code — the app itself is fine. (A Dockerfile that merely "
+    "exists in the repository isn't the problem; only a command that actually invokes Docker is.)"
 )
 
 _ORPHANED_RUN_MESSAGE = (
@@ -223,6 +244,10 @@ async def _run_deploy(project_id: str, user_id: str, targets: list[dict]) -> Non
     try:
         project = await projects_repo.get_by_id(project_id)
         ordered = _order_targets(targets)
+        # Phase 5.3: a Sprite's URL routes to ONE port, so exactly one target — the
+        # entry target (a frontend, else the first non-backend) — is given the
+        # `http_port` that the preview points at. See preview_runtime.entry_target_name.
+        entry_name = preview_runtime.entry_target_name(targets)
         resolved_ports: dict[str, int] = {}
         overall_ok = True
 
@@ -230,7 +255,7 @@ async def _run_deploy(project_id: str, user_id: str, targets: list[dict]) -> Non
             extra_env = {}
             if target["name"].strip().lower() == "frontend" and "backend" in resolved_ports:
                 extra_env["BACKEND_URL"] = f"http://127.0.0.1:{resolved_ports['backend']}"
-            ok, resolved_target = await _deploy_one_target(project, user_id, target, extra_env)
+            ok, resolved_target = await _deploy_one_target(project, user_id, target, extra_env, entry_name=entry_name)
             overall_ok = overall_ok and ok
             if ok and resolved_target.get("port"):
                 resolved_ports[target["name"].strip().lower()] = resolved_target["port"]
@@ -242,6 +267,11 @@ async def _run_deploy(project_id: str, user_id: str, targets: list[dict]) -> Non
             targets = [resolved_target if t["name"] == target["name"] else t for t in targets]
             await projects_repo.set_deploy_targets(project_id, targets, confirmed=True)
 
+        if overall_ok:
+            # §23.9 point 4 / §23.8: a deploy that worked closes the notifications a
+            # failed one raised (a green deploy says nothing about runtime-only
+            # problems like CORS, which is why only deploy-failure ones are closed).
+            await preview_notifications.resolve_after_success(project_id)
         _broadcast(project_id, {"type": "__deploy_status__", "status": "completed" if overall_ok else "failed"})
     except Exception as exc:  # noqa: BLE001 — anything unexpected must still close out the run row
         logger.exception("Deploy pipeline crashed for project %s", project_id)
@@ -255,18 +285,20 @@ async def _run_deploy(project_id: str, user_id: str, targets: list[dict]) -> Non
 
 
 def _order_targets(targets: list[dict]) -> list[dict]:
-    """A target literally named "backend" goes first when both it and one
-    literally named "frontend" are present, so the frontend's BACKEND_URL
-    injection (module docstring) has a resolved port to use by the time it's
-    that target's own turn. Every other ordering is left as declared —
-    there's no general dependency graph here (module docstring)."""
-    names = {t["name"].strip().lower() for t in targets}
-    if "backend" in names and "frontend" in names:
-        return sorted(targets, key=lambda t: 0 if t["name"].strip().lower() == "backend" else 1)
-    return targets
+    """Moved to preview_runtime.order_targets in Phase 5.3 (preview_runtime.restart_all
+    needs the identical ordering and can't import this module without a cycle)."""
+    return preview_runtime.order_targets(targets)
 
 
-async def _deploy_one_target(project: dict, user_id: str, target: dict, extra_env: dict) -> tuple[bool, dict]:
+async def _redact(project_id: str, text: str | None) -> str:
+    """§23.10: a preview secret's value never lands in a stored log, a diagnosis,
+    or anything the model later reads. Build/start output is all three."""
+    return (await preview_secrets_service.redact_text(project_id, text)) or ""
+
+
+async def _deploy_one_target(
+    project: dict, user_id: str, target: dict, extra_env: dict, entry_name: str | None = None
+) -> tuple[bool, dict]:
     project_id = project["id"]
     target_name = target["name"] if target["root"] != "." or len(project.get("deploy_targets") or []) > 1 else None
 
@@ -278,20 +310,10 @@ async def _deploy_one_target(project: dict, user_id: str, target: dict, extra_en
 
     scan = await _scan_root(project_id, target["root"])
 
-    if scan.get("dockerfile"):
-        await deploy_runs_repo.update(
-            run_row["id"],
-            {
-                "status": "failed",
-                "phase": "build",
-                "stack": "dockerfile",
-                "failure_class": "environment",
-                "diagnosis_text": _NESTED_SANDBOX_MESSAGE,
-                "completed_at": _now_iso(),
-            },
-        )
-        _broadcast(project_id, {"type": "phase", "run_id": run_row["id"], "target_name": target_name, "phase": "build", "status": "failed", "nested_sandbox": True})
-        return False, {**target, "stack": "dockerfile"}
+    # §23.8's secrets row, caught BEFORE the app fails: if the repo ships a
+    # .env.example naming variables the preview hasn't been given, say so now.
+    # Informational and non-blocking — the deploy proceeds either way.
+    await preview_notifications.scan_missing_env(project_id, scan.get("env_example"), run_row["id"])
 
     try:
         detection = await _resolve_stack(project, target, scan)
@@ -310,6 +332,20 @@ async def _deploy_one_target(project: dict, user_id: str, target: dict, extra_en
         _broadcast(project_id, {"type": "phase", "run_id": run_row["id"], "target_name": target_name, "phase": "detect", "status": "failed"})
         return False, target
 
+    await deploy_runs_repo.update(run_row["id"], {"stack": detection.stack, "build_cmd": detection.build_cmd, "run_cmd": detection.run_cmd, "port": detection.port})
+
+    # §23.6: "if the repo's own logic tries to spin up its own Docker/sandbox" —
+    # detected deterministically from the commands themselves, before anything is
+    # attempted. Deliberately NOT triggered by a Dockerfile merely existing (see the
+    # module docstring). The unresolved `target` is returned, not a resolved one: the
+    # commands that need Docker must not be persisted as "the plan", or every later
+    # deploy would reuse them instead of re-detecting after the person changes the repo.
+    if preview_limitations.mentions_docker(detection.build_cmd) or preview_limitations.mentions_docker(detection.run_cmd):
+        await deploy_runs_repo.update(run_row["id"], {"status": "failed", "phase": "build", "completed_at": _now_iso()})
+        await _record_environment_failure(project_id, run_row["id"], "nested_container", _NESTED_SANDBOX_MESSAGE)
+        _broadcast(project_id, {"type": "phase", "run_id": run_row["id"], "target_name": target_name, "phase": "build", "status": "failed", "nested_sandbox": True})
+        return False, target
+
     resolved_target = {
         "name": target["name"],
         "root": target["root"],
@@ -318,10 +354,12 @@ async def _deploy_one_target(project: dict, user_id: str, target: dict, extra_en
         "run_cmd": detection.run_cmd,
         "port": detection.port,
     }
-    await deploy_runs_repo.update(run_row["id"], {"stack": detection.stack, "build_cmd": detection.build_cmd, "run_cmd": detection.run_cmd, "port": detection.port})
 
     cwd = resolve_repo_path(target["root"])
     port = detection.port
+    # The BUILD step gets only harness-managed variables — preview secrets are
+    # runtime-only (§23.8: "injected into the Sprite's runtime env only"), and this
+    # string ends up in a command line.
     env_prefix = _env_prefix({**({"PORT": str(port)} if port else {}), **extra_env})
 
     _broadcast(project_id, {"type": "phase", "run_id": run_row["id"], "target_name": target_name, "phase": "build", "status": "running"})
@@ -329,7 +367,8 @@ async def _deploy_one_target(project: dict, user_id: str, target: dict, extra_en
         build_result = await workspace_service.exec_in_workspace(
             project_id, ["bash", "-c", f"{env_prefix}{detection.build_cmd}"], timeout=BUILD_TIMEOUT_SECONDS, cwd=cwd
         )
-        stdout, stderr = truncate_output(build_result.stdout), truncate_output(build_result.stderr)
+        stdout = await _redact(project_id, truncate_output(build_result.stdout))
+        stderr = await _redact(project_id, truncate_output(build_result.stderr))
         if build_result.exit_code != 0:
             await _fail_run(project, run_row["id"], "build", detection.build_cmd, None, stdout, stderr, build_result.exit_code)
             _broadcast(project_id, {"type": "phase", "run_id": run_row["id"], "target_name": target_name, "phase": "build", "status": "failed"})
@@ -337,7 +376,16 @@ async def _deploy_one_target(project: dict, user_id: str, target: dict, extra_en
         await deploy_runs_repo.update(run_row["id"], {"stdout": stdout, "stderr": stderr})
 
     _broadcast(project_id, {"type": "phase", "run_id": run_row["id"], "target_name": target_name, "phase": "start", "status": "running"})
-    started, run_stdout, run_stderr, exit_code = await _start_and_probe(project_id, cwd, detection.run_cmd, env_prefix, target["name"])
+    # The RUNTIME env: the person's preview secrets (fetched fresh from Vault) with
+    # the harness-managed variables on top. Goes to the Sprite service's `env`
+    # parameter — never into a command line, never into a file this harness writes.
+    secret_env = await preview_secrets_service.get_runtime_env(project_id)
+    run_env = preview_runtime.build_target_env(port, extra_env, secret_env)
+    http_port = port if (entry_name is not None and target["name"] == entry_name and port) else None
+    started, run_stdout, run_stderr, exit_code = await _start_and_probe(
+        project_id, cwd, detection.run_cmd, run_env, target["name"], http_port=http_port
+    )
+    run_stdout, run_stderr = await _redact(project_id, run_stdout), await _redact(project_id, run_stderr)
     if not started:
         await _fail_run(project, run_row["id"], "start", detection.build_cmd, detection.run_cmd, run_stdout, run_stderr, exit_code)
         _broadcast(project_id, {"type": "phase", "run_id": run_row["id"], "target_name": target_name, "phase": "start", "status": "failed"})
@@ -374,42 +422,90 @@ async def _fail_run(project: dict, run_id: str, phase: str, build_cmd, run_cmd, 
     both in one update after the LLM call — as this used to — meant the raw log
     stayed invisible for as long as the diagnosis took, and was lost with it if
     that call raised something unexpected. See deploy_diagnosis.py's own
-    docstring for why a failed diagnosis must never take the raw log with it."""
+    docstring for why a failed diagnosis must never take the raw log with it.
+
+    Phase 5.4 adds §23.9 point 4's routing: an *environment* failure (not a bug in
+    the app's code) is classified into one of §23.8's known limitations and
+    raised as a notification. A Docker-daemon failure is recognised
+    deterministically and never costs an LLM call; everything else uses the
+    diagnosis model's `environment_kind`, with the same pure classifier as the
+    fallback when no model is available."""
+    project_id = project["id"]
+    stdout, stderr = await _redact(project_id, stdout), await _redact(project_id, stderr)
     await deploy_runs_repo.update(
         run_id,
         {"status": "failed", "phase": phase, "exit_code": exit_code, "stdout": stdout, "stderr": stderr, "completed_at": _now_iso()},
     )
+    heuristic_kind = preview_limitations.classify_environment_issue(f"{stdout}\n{stderr}")
+
+    if heuristic_kind == "nested_container":
+        await _record_environment_failure(project_id, run_id, "nested_container", _NESTED_SANDBOX_MESSAGE)
+        return
+
     try:
         credential = await llm_client.resolve_credential(project)
         diagnosis = await deploy_diagnosis.diagnose(phase, build_cmd, run_cmd, stdout, stderr, exit_code, credential)
+        kind = (diagnosis.environment_kind or heuristic_kind or "other") if diagnosis.failure_class == "environment" else None
+        diagnosis_text = await _redact(project_id, diagnosis.diagnosis_text)
         await deploy_runs_repo.update(
             run_id,
             {
                 "failure_class": diagnosis.failure_class,
-                "diagnosis_text": diagnosis.diagnosis_text,
+                "environment_kind": kind,
+                "diagnosis_text": diagnosis_text,
                 "suggested_fix_prompt": diagnosis.suggested_fix_prompt,
             },
         )
+        if kind:
+            await preview_notifications.raise_environment_failure(project_id, kind, diagnosis_text, run_id)
     except (llm_client.NoLlmCredentialError, llm_client.LlmCallFailedError, deploy_diagnosis.DiagnosisLlmError):
-        pass  # best-effort — the raw log above is already saved regardless
+        # No model to ask — but a recognisable environment signature in the log is
+        # still worth surfacing, so the person isn't left with only a raw log.
+        if heuristic_kind:
+            await _record_environment_failure(project_id, run_id, heuristic_kind, None)
     except Exception:  # noqa: BLE001 — diagnosis is never allowed to fail the deploy itself
         logger.exception("Deploy diagnosis crashed for run %s", run_id)
+
+
+async def _record_environment_failure(project_id: str, run_id: str, kind: str, text: str | None) -> None:
+    """Marks a run as an environment failure of a known §23.8 kind and raises the
+    matching notification. With no `text`, the standing guidance for that kind is
+    used as the diagnosis, so the Deploy panel and the notification agree."""
+    if text is None:
+        ctx = await preview_notifications.context_for(project_id)
+        text = preview_limitations.guidance_for(kind, ctx)["why"]
+    await deploy_runs_repo.update(
+        run_id,
+        {"failure_class": "environment", "environment_kind": kind, "diagnosis_text": text, "suggested_fix_prompt": None},
+    )
+    await preview_notifications.raise_environment_failure(project_id, kind, text, run_id)
 
 
 # ---------------------------------------------------------------------------
 # Scanning and process start/probe
 # ---------------------------------------------------------------------------
 
+# Every `cat` below is followed by `echo`: a file with no trailing newline (very common
+# for hand-edited or tool-generated package.json/Procfile) would otherwise have the
+# NEXT section marker glued onto its last line, and _parse_root_scan would never see
+# that marker — silently losing the following section (for package.json that meant
+# losing @@PNPM_LOCK@@/@@YARN_LOCK@@ and @@TOP_LEVEL_FILES@@, so a pnpm project
+# was built with npm). Found in Phase 5.3's review of the .env.example capture.
 _ROOT_SCAN_SCRIPT = (
     "[ -f Dockerfile ] && echo '@@DOCKERFILE@@'; "
-    "[ -f package.json ] && { echo '@@PACKAGE_JSON@@'; cat package.json; }; "
+    "[ -f package.json ] && { echo '@@PACKAGE_JSON@@'; cat package.json; echo; }; "
     "[ -f requirements.txt ] && echo '@@REQUIREMENTS_TXT@@'; "
-    "[ -f Procfile ] && { echo '@@PROCFILE@@'; cat Procfile; }; "
+    "[ -f Procfile ] && { echo '@@PROCFILE@@'; cat Procfile; echo; }; "
     "[ -f manage.py ] && echo '@@MANAGE_PY@@'; "
-    "[ -f app.py ] && { echo '@@APP_PY@@'; cat app.py; }; "
-    "[ -f main.py ] && { echo '@@MAIN_PY@@'; cat main.py; }; "
+    "[ -f app.py ] && { echo '@@APP_PY@@'; cat app.py; echo; }; "
+    "[ -f main.py ] && { echo '@@MAIN_PY@@'; cat main.py; echo; }; "
     "[ -f pnpm-lock.yaml ] && echo '@@PNPM_LOCK@@'; "
     "[ -f yarn.lock ] && echo '@@YARN_LOCK@@'; "
+    # Phase 5.4: the first .env.example-style file, capped. The trailing `echo` matters:
+    # `head -c` can stop mid-line with no newline, and without it the next section
+    # marker would be glued onto the end of the last variable and never recognised.
+    "for f in .env.example .env.sample .env.template .env.local.example; do "
+    "[ -f \"$f\" ] && { echo '@@ENV_EXAMPLE@@'; head -c 20000 \"$f\"; echo; break; }; done; "
     "echo '@@TOP_LEVEL_FILES@@'; "
     "ls -1a . 2>/dev/null | grep -v -E '^(\\.|\\.\\.|\\.git|node_modules|\\.next|__pycache__|\\.venv)$'; "
     "true"
@@ -425,6 +521,7 @@ _SCAN_SECTION_KEYS = {
     "@@MAIN_PY@@": ("main_py", "text"),
     "@@PNPM_LOCK@@": ("pnpm_lock", "flag"),
     "@@YARN_LOCK@@": ("yarn_lock", "flag"),
+    "@@ENV_EXAMPLE@@": ("env_example", "text"),
     "@@TOP_LEVEL_FILES@@": ("top_level_files", "list"),
 }
 
@@ -476,85 +573,37 @@ def _env_prefix(env: dict[str, str]) -> str:
     return f"{exports} && "
 
 
-def _shell_quote(value: str) -> str:
-    return "'" + value.replace("'", "'\\''") + "'"
+_shell_quote = preview_runtime.shell_quote
+_slot_slug = preview_runtime.slot_slug
 
 
-def _slot_slug(target_name: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_-]", "_", target_name.strip()) or "app"
+async def _start_and_probe(
+    project_id: str,
+    target_dir: str,
+    run_cmd: str,
+    env: dict[str, str],
+    target_name: str,
+    http_port: int | None = None,
+) -> tuple[bool, str, str, int | None]:
+    """Starts run_cmd as a Sprite service and judges it by whether it is still alive
+    PROBE_SECONDS later. The mechanics live in preview_runtime.launch_and_probe —
+    this wrapper keeps the name and the (started, log, stderr, exit_code) contract
+    this module's callers and tests have used since 5.1.
 
+    The health signal is unchanged from 5.1 and still deliberately NOT an HTTP
+    check (module docstring): "still alive after a few seconds" catches an app that
+    crashed on startup (missing dependency, bad config read, a syntax error the
+    build step didn't catch), without a false "unhealthy" for the many apps that
+    don't answer 200 on `/`.
 
-async def _start_and_probe(project_id: str, target_dir: str, run_cmd: str, env_prefix: str, target_name: str) -> tuple[bool, str, str, int | None]:
-    """Launches run_cmd detached, waits PROBE_SECONDS, then checks whether the
-    process is still alive. "Still alive after a few seconds" — not an HTTP
-    health check against the detected port — is the health signal (module
-    docstring): a process that's still running is evidence the app didn't crash
-    on startup (a missing dependency, a bad config read, a syntax error the
-    build step's own language didn't catch), which is what this phase exists to
-    catch; whether it's *also* correctly serving HTTP yet is a separate, later
-    concern (§23's Live Preview / proxying, out of scope here).
-
-    Three things this handles that a plain `nohup ... &` does not:
-      - A previous deploy of the same target is still running (a successful
-        deploy is meant to keep running) and holds the same fixed port. It is
-        stopped first (its whole process group), otherwise every redeploy would
-        die with "address already in use". The pid/exit/log files are keyed by
-        target name, not run id, so the next deploy can find the last one.
-      - The real exit code. The app runs inside a small wrapper shell that
-        records its own pid and, when the app exits, its exit status; `wait`
-        can't do this from a different shell than the one that launched it.
-        The exit file is checked BEFORE `kill -0`: an exited-but-unreaped
-        process (a zombie) still answers `kill -0`, which made a crashed app
-        look healthy when this was tested in a real shell.
-      - `target_dir` is shell-quoted, so a root with a space or shell
-        metacharacter can't break or alter the launch script.
-
-    One exec_in_workspace call does the stop, launch, sleep, aliveness check and
-    log tail together — same "one round trip" cost-consciousness as
-    run_lint/repo_map's own combined scripts. The exec call's own `cwd` is
-    REPO_ROOT regardless of `target_dir`; the script `cd`s itself."""
-    slug = _slot_slug(target_name)
-    pid_path = f"/tmp/qh-deploy-{slug}.pid"
-    exit_path = f"/tmp/qh-deploy-{slug}.exit"
-    log_path = f"/tmp/qh-deploy-{slug}.log"
-    wrapper = f"echo $$ > {pid_path}; {env_prefix}bash -c {_shell_quote(run_cmd)}; echo $? > {exit_path}"
-    script = (
-        f"if [ -f {pid_path} ]; then "
-        f"kill -- -$(cat {pid_path}) 2>/dev/null; kill $(cat {pid_path}) 2>/dev/null; sleep 1; "
-        f"fi; "
-        f"rm -f {pid_path} {exit_path}; "
-        f"SETSID=$(command -v setsid || true); "
-        f"cd {_shell_quote(target_dir)} && "
-        f"(nohup $SETSID bash -c {_shell_quote(wrapper)} > {log_path} 2>&1 &) ; "
-        f"sleep {PROBE_SECONDS} ; "
-        f"if [ -f {exit_path} ]; then "
-        f'  echo "QH_EXIT_CODE:$(cat {exit_path})"; '
-        f"elif [ -f {pid_path} ] && kill -0 $(cat {pid_path}) 2>/dev/null; then "
-        f'  echo "QH_STILL_RUNNING"; '
-        f"else "
-        f'  echo "QH_EXIT_CODE:"; '
-        f"fi; "
-        f"echo '---QH_LOG---'; cat {log_path} 2>/dev/null"
+    What changed in 5.3 is only WHO runs the process — a Sprite service instead of a
+    detached `nohup` that died with the Sprite's RAM (preview_runtime's module
+    docstring) — and that `env` is now a dict handed to the service, not a string of
+    `export` statements baked into a command line. That second change is what lets
+    preview secrets reach the app without ever appearing in an argv."""
+    return await preview_runtime.launch_and_probe(
+        project_id, target_dir, run_cmd, env, target_name, http_port=http_port, probe_seconds=PROBE_SECONDS
     )
-    result = await workspace_service.exec_in_workspace(
-        project_id, ["bash", "-c", script], timeout=START_PROBE_TIMEOUT_SECONDS, cwd=REPO_ROOT
-    )
-    stdout = result.stdout
-    still_running = "QH_STILL_RUNNING" in stdout.splitlines()[:3] if stdout else False
-    log_tail = stdout.split("---QH_LOG---", 1)[-1].strip() if "---QH_LOG---" in stdout else stdout
-
-    if still_running:
-        return True, truncate_output(log_tail), truncate_output(result.stderr), None
-
-    exit_code = None
-    for line in stdout.splitlines():
-        if line.startswith("QH_EXIT_CODE:"):
-            try:
-                exit_code = int(line.split(":", 1)[1])
-            except ValueError:
-                exit_code = None
-            break
-    return False, truncate_output(log_tail), truncate_output(result.stderr), exit_code
 
 
 def _now_iso() -> str:

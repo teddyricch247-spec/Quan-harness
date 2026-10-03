@@ -78,7 +78,7 @@ class DetectionLlmError(ValueError):
 
 @dataclass
 class StackDetectionResult:
-    stack: str  # 'nextjs' | 'node' | 'python' | 'dockerfile' | 'llm_fallback'
+    stack: str  # 'nextjs' | 'node' | 'python' | 'llm_fallback' ('dockerfile' is no longer produced as of Phase 5.3 — see detect_stack_from_rules)
     build_cmd: str | None
     run_cmd: str | None
     port: int | None
@@ -101,16 +101,16 @@ def detect_stack_from_rules(scan: dict) -> StackDetectionResult | None:
     keys. Returns None (→ caller falls back to the LLM) when nothing below
     matches confidently, per this module's own "all or nothing" rule.
 
-    Checked in Nixpacks' own stated order (§23.5): Dockerfile first — if
-    present, this is the *only* rule that fires, deliberately never combined
-    with the package.json/requirements.txt checks below it, since a
-    Dockerfile's presence is a declaration of how the repo wants to be built,
-    not a fallback signal. Building it is a Live Preview/deploy_pipeline.py
-    concern (§23.6's nested-sandboxing rule — Sprites can't do it); detecting
-    it is what this function does."""
-    if scan.get("dockerfile"):
-        return StackDetectionResult(stack="dockerfile", build_cmd=None, run_cmd=None, port=None)
-
+    Checked in Nixpacks' own stated order (§23.5) minus its Dockerfile step. A
+    Dockerfile used to short-circuit here (stack="dockerfile", nothing to run), which
+    made every repo that merely *ships* one un-previewable. §23.6's nested-sandboxing
+    case is "the repo's own logic tries to spin up its own Docker inside the
+    workspace" — a property of the build/run COMMANDS, not of a file existing — so a
+    Dockerfile is now ignored here, and a project that really needs Docker is
+    recognised afterwards by preview_limitations.mentions_docker on the detected
+    commands (deploy_pipeline._deploy_one_target) or by the daemon being unavailable
+    in a log (preview_limitations.classify_environment_issue). A Dockerfile-only repo
+    with no package.json/requirements.txt falls through to the LLM fallback below."""
     if scan.get("package_json") is not None:
         result = _detect_node_stack(scan)
         if result is not None:
@@ -261,7 +261,12 @@ def build_stack_detection_prompt(root_label: str, scan: dict) -> str:
         '{"build_cmd": "<shell command to install dependencies and build, or null '
         'if nothing needs building>", "run_cmd": "<shell command to start the app, '
         'reading its port from the $PORT environment variable>", "port": <integer '
-        "port the app will listen on>}"
+        "port the app will listen on>}\n\n"
+        "Docker, docker-compose and podman are NOT available in this environment: never "
+        "propose a command that invokes them, even if the directory contains a Dockerfile "
+        "or compose file. Propose commands that build and run the app directly with its "
+        "own toolchain (a Dockerfile can still tell you which toolchain and entry point "
+        "the app uses)."
     )
 
 

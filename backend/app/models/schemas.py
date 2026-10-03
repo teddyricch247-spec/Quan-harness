@@ -483,7 +483,93 @@ class DeployRunOut(BaseModel):
     stdout: str
     stderr: str
     failure_class: str | None
+    environment_kind: str | None = None  # Phase 5.3/5.4 — which §23.8 limitation an environment failure looks like
     diagnosis_text: str | None
     suggested_fix_prompt: str | None
     created_at: datetime
     completed_at: datetime | None
+
+
+# ---------------------------------------------------------------------------
+# Live Preview (§23.7) and known preview limitations (§23.8) — Phase 5.3 / 5.4
+# ---------------------------------------------------------------------------
+
+
+class PreviewStatusOut(BaseModel):
+    configured: bool  # does this server have PREVIEW_BASE_DOMAIN + PREVIEW_SIGNING_SECRET
+    can_open: bool  # configured AND something has been deployed
+    unavailable_reason: str | None
+    subdomain: str | None
+    origin: str | None  # the stable preview origin — the one thing a client allowlists for CORS (§23.8)
+    billing_state: Literal["running", "warm", "cold"] | None
+    entry_target: str | None
+    deployed: bool
+    # Deliberately NOT here, and not anywhere in any response: the Sprite's own URL (§23.7).
+
+
+class PreviewSessionOut(BaseModel):
+    url: str  # single-use, short-lived; loads in the iframe, sets the session cookie, redirects home
+    expires_in_seconds: int
+
+
+class PreviewRestartTargetResult(BaseModel):
+    target: str
+    started: bool
+    exit_code: int | None
+    log: str
+
+
+class PreviewRestartOut(BaseModel):
+    results: list[PreviewRestartTargetResult]
+
+
+class PreviewSecretUpsert(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    value: str = Field(min_length=1)
+
+
+class PreviewSecretOut(BaseModel):
+    """Name, an optional hint, timestamps. NEVER the value — and the hint is only
+    present for values long enough that four characters aren't most of the secret."""
+
+    id: str
+    name: str
+    value_hint: str | None
+    created_at: datetime
+    updated_at: datetime
+    created: bool | None = None  # only set on PUT: true = new, false = replaced
+
+
+class GuidanceOption(BaseModel):
+    label: str
+    detail: str
+    # A UI hint for a button the PERSON clicks (open the Secrets panel, copy the
+    # origin). Never something the harness performs on their behalf — §23.8.
+    action: Literal["copy_origin", "copy_ips", "open_secrets"] | None = None
+
+
+class GuidanceOut(BaseModel):
+    kind: str
+    title: str
+    can_fix: Literal["yes", "partly", "no"]
+    why: str
+    options: list[GuidanceOption]
+
+
+class PreviewNotificationOut(BaseModel):
+    id: str
+    kind: str
+    status: Literal["open", "dismissed", "resolved"]
+    source: str
+    title: str
+    body: str
+    detail: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+    guidance: GuidanceOut
+
+
+class PreviewLimitationsOut(BaseModel):
+    origin: str | None
+    egress_ips: list[str]
+    guidance: list[GuidanceOut]

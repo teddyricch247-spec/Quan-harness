@@ -24,10 +24,11 @@ from app.repositories import (
     mcp_servers as connectors_repo,
     project_knowledge as project_knowledge_repo,
     project_memory as project_memory_repo,
+    preview_secrets as preview_secrets_repo,
     project_schedules as project_schedules_repo,
     projects as repo,
 )
-from app.services import git_sync, github_oauth, scheduler, scheduler_rules, vault, workspace_service
+from app.services import git_sync, github_oauth, preview_runtime, scheduler, scheduler_rules, vault, workspace_service
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -165,6 +166,17 @@ async def create_project(body: ProjectCreate, user: AuthedUser = Depends(verifie
     # 'scratch' and 'create_new_repo' modes). See /docs/PHASE2_NOTES.md.
     await repo.create_workspace_stub(row["id"], sprite_handle=workspace_service.new_workspace_stub_handle())
 
+    # Phase 5.3 (§23.8): the project's stable preview subdomain, assigned once here
+    # and never changed (a DB trigger enforces that — 0011_preview.sql), so a client
+    # can allowlist its CORS origin a single time. Done as its own step with its own
+    # collision retry rather than inside the insert above, so a (vanishingly rare)
+    # collision can never fail project creation; preview_runtime assigns it lazily
+    # later if this ever doesn't land.
+    try:
+        await preview_runtime.ensure_preview_subdomain(row)
+    except Exception:  # noqa: BLE001 — non-fatal by design
+        pass
+
     await repo.grant_connector_access(row["id"], body.connector_ids)
 
     # Phase 4.4: 'import' mode is the one case where the workspace needs real
@@ -242,6 +254,9 @@ async def delete_project(project_id: str, body: ProjectDeleteRequest, user: Auth
         raise HTTPException(status_code=404, detail="Project not found.")
     if body.confirmation != existing["name"]:
         raise HTTPException(status_code=400, detail="Confirmation text must exactly match the project name.")
+    # Phase 5.3: preview secrets live in Vault; the table's ON DELETE CASCADE would
+    # drop the rows and leave every value orphaned there. Remove them first.
+    await preview_secrets_repo.delete_all_for_project(project_id)
     await repo.delete_for_user(user.user_id, project_id)
     await audit.record(user.user_id, "project", "delete", True, project_id=project_id, output_summary=existing["name"])
 

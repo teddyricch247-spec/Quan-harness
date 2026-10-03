@@ -220,3 +220,41 @@ async def grant_connector_access(project_id: str, connector_ids: list[str]) -> N
         ).execute()
 
     await run_in_threadpool(_call)
+
+
+async def get_by_preview_subdomain(subdomain: str) -> dict | None:
+    """Phase 5.3: the Live Preview proxy's own lookup — a request arrives for
+    `<subdomain>.<preview-domain>` and the only thing known about it is the
+    subdomain. Unscoped by user for the same reason get_by_id is: the proxy is a
+    service-to-service caller that authenticates the *request* itself (the signed
+    session cookie, see preview_tokens.py), not via a user JWT."""
+    client = get_service_client()
+
+    def _call():
+        rows = client.table(TABLE).select("*").eq("preview_subdomain", subdomain).limit(1).execute().data
+        return rows[0] if rows else None
+
+    return await run_in_threadpool(_call)
+
+
+async def set_preview_subdomain_if_unset(project_id: str, subdomain: str) -> dict | None:
+    """Assigns the stable preview subdomain exactly once. The `is null` guard in
+    the query plus 0011_preview.sql's immutability trigger mean a value that's
+    already set can never be overwritten — "allowlist it once" depends on that.
+    Returns the updated row, or None if one was already set (or a unique-index
+    collision made the insert lose — the caller just retries with a new random
+    suffix)."""
+    client = get_service_client()
+
+    def _call():
+        rows = (
+            client.table(TABLE)
+            .update({"preview_subdomain": subdomain})
+            .eq("id", project_id)
+            .is_("preview_subdomain", "null")
+            .execute()
+            .data
+        )
+        return rows[0] if rows else None
+
+    return await run_in_threadpool(_call)

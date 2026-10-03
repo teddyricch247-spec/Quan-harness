@@ -71,6 +71,7 @@ DESIGN DECISIONS NOT SPELLED OUT VERBATIM IN THE SPEC EXCERPT (see
 """
 import asyncio
 import datetime
+import dataclasses
 from dataclasses import dataclass
 
 from app.repositories import approval_requests as approval_requests_repo
@@ -92,8 +93,10 @@ from app.services import (
     mcp_tools,
     memory_extraction,
     message_builder,
+    preview_secrets_service,
     project_knowledge,
     repo_map,
+    secret_redaction,
     shell_tools,
     stuck_detector,
     system_prompt,
@@ -678,10 +681,34 @@ async def _execute_call(
     outcome = await _execute_call_inner(
         project_id, session_id, user_id, name, arguments, viewed_paths, merged_mcp, session, conversation_snapshot
     )
+    # §23.10 / Phase 5.4: preview secrets are "never in the LLM's context." This is
+    # the one place every tool result passes through on its way to the transcript
+    # and the model, so it's the one place that guarantees it: whatever a tool
+    # managed to read out of the workspace (a file, a process listing, a log, a
+    # connector's reply), a preview secret's value is gone before anything else sees
+    # it — including the audit row written just below. See secret_redaction.py for
+    # what this does and doesn't cover.
+    outcome = await _redact_preview_secrets(project_id, outcome)
     if name != "execute_bash":
         mcp_tool = merged_mcp.by_model_name().get(name) if name.startswith("mcp__") else None
         await _record_tool_audit(user_id, project_id, session_id, name, arguments, outcome, mcp_tool)
     return outcome
+
+
+async def _redact_preview_secrets(project_id: str, outcome: ExecutionOutcome) -> ExecutionOutcome:
+    """Fails CLOSED on purpose: if the secret values can't be loaded, the exception
+    propagates and the tool call is recorded as failed, rather than letting an
+    unredacted result through. (The cost is a tool call erroring during a database
+    blip — every tool call already depends on the same database for its audit row.)"""
+    values = await preview_secrets_service.get_redaction_values(project_id)
+    if not values:
+        return outcome
+    return dataclasses.replace(
+        outcome,
+        content=secret_redaction.redact(outcome.content, values) or "",
+        error=secret_redaction.redact(outcome.error, values) or "",
+        guard_reason=secret_redaction.redact(outcome.guard_reason, values),
+    )
 
 
 # ---------------------------------------------------------------------------

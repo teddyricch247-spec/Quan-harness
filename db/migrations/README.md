@@ -1,7 +1,15 @@
 # Running these migrations
 
-**Status as of 2026-09-29:** `0001` through `0010_deploy_pipeline.sql` are all
-applied to the live `quan-harness` Supabase project. `0008`/`0009` were applied
+**Status as of 2026-10-02:** `0001` through `0011_preview.sql` are all
+applied to the live `quan-harness` Supabase project. `0011` (Phase 5.3/5.4) was
+dry-run first — the full DDL plus 25 positive/negative assertions (the
+subdomain immutability trigger, uniqueness and format checks, every CHECK
+constraint, RLS isolation between two users, cascade delete) inside a
+transaction that was rolled back, with the rollback itself confirmed — then
+applied via the Supabase MCP connector and verified against the live schema. The
+`projects` table had 0 rows, so its subdomain backfill touched nothing. The
+recorded migration has the same statements as the file with the long header
+comments trimmed. `0008`/`0009` were applied
 via the Supabase MCP connector on 2026-09-24/27 (`0008` is recorded there under
 the name `connector_oauth_client`). `0010` (Phase 5.1/5.2/5.5) was applied the
 same way on 2026-09-29 and then verified against the live database, not just
@@ -24,7 +32,7 @@ Postgres database. Two ways to do it — pick whichever you're comfortable with:
 3. Repeat for `0002_connections.sql`, `0003_vault_helpers.sql`, `0004_projects.sql`,
    `0005_sessions.sql`, `0006_workspace_tools.sql`, `0007_memory_and_project_knowledge.sql`,
    `0008_connector_oauth_client.sql`, `0009_scheduling.sql`, `0010_deploy_pipeline.sql`,
-   in that order.
+   `0011_preview.sql`, in that order.
 
 **Option B — Supabase CLI**
 ```bash
@@ -76,3 +84,10 @@ table_name = 'projects';` should additionally list `repo_origin` and
 
 See `/docs/YOUR_SETUP_CHECKLIST.md` for the rest of the Supabase setup (Vault,
 service role key, JWT secret, RLS live-test).
+- `0011` (Phase 5.3/5.4) adds `preview_secrets` and `project_notifications`
+  (both reference `projects`; the latter also references `0010`'s `deploy_runs`),
+  an immutable-once-set unique `projects.preview_subdomain`, and
+  `deploy_runs.environment_kind` — needs `0004` and `0010` to already exist,
+  nothing else depends on it. It **backfills** a subdomain for existing projects
+  before adding the format constraint, so run it before any code that assumes every
+  project has one.

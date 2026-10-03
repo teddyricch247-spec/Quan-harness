@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from app.services import llm_client
 from app.services.deploy_detection import DetectionLlmError, parse_json_object
 
+_ENVIRONMENT_KINDS = ("secrets", "cors", "oauth", "database", "other")
+
 # §23.9 point 4's own two examples, given verbatim so the model classifies
 # against the same vocabulary the UI branches on, not its own paraphrase of it.
 _ENVIRONMENT_EXAMPLES = "missing secrets, CORS misconfiguration, a database that's unreachable"
@@ -42,6 +44,10 @@ class DeployDiagnosis:
     diagnosis_text: str
     failure_class: str  # 'build' | 'environment'
     suggested_fix_prompt: str | None  # always None when failure_class == 'environment'
+    # Phase 5.4: which of §23.8's known preview limitations an *environment* failure
+    # looks like — 'secrets' | 'cors' | 'oauth' | 'database' | 'other'. None for a
+    # build-class failure. Routes the failure to the matching notification.
+    environment_kind: str | None = None
 
 
 def build_diagnosis_prompt(phase: str, build_cmd: str | None, run_cmd: str | None, stdout: str, stderr: str, exit_code: int | None) -> str:
@@ -64,12 +70,20 @@ def build_diagnosis_prompt(phase: str, build_cmd: str | None, run_cmd: str | Non
         '  "build" — the app\'s own code doesn\'t run (a real bug: a syntax error, a '
         "missing import, a failing test, a type error, and so on).\n"
         f'  "environment" — not a code bug ({_ENVIRONMENT_EXAMPLES}, or similar).\n\n'
+        'If (and only if) it is "environment", also say which kind, as exactly one of:\n'
+        '  "secrets" — an API key, token or environment variable the app needs is missing or unset.\n'
+        '  "cors" — a browser request was blocked because the backend doesn\'t allow this origin.\n'
+        '  "oauth" — a sign-in redirect/callback URL isn\'t registered with the identity provider.\n'
+        '  "database" — a database or other data store is unreachable (IP allow-list, private network, wrong host).\n'
+        '  "other" — an environment problem that is none of the above.\n\n'
         "Respond with exactly this shape:\n"
         '{"diagnosis": "<2-4 sentence explanation of what actually went wrong>", '
-        '"failure_class": "build" | "environment", "suggested_fix_prompt": '
-        '"<a short instruction the person could hand back to a coding agent to fix this, '
-        'or null if failure_class is \\"environment\\" — never suggest a code fix for an '
-        "environment issue>\"}"
+        '"failure_class": "build" | "environment", '
+        '"environment_kind": "secrets" | "cors" | "oauth" | "database" | "other" | null, '
+        '"suggested_fix_prompt": "<a short instruction the person could hand back to a coding agent '
+        'to fix this, or null if failure_class is \\"environment\\" — never suggest a code fix for an '
+        'environment issue>"}\n'
+        'environment_kind must be null whenever failure_class is "build".'
     )
 
 
@@ -103,8 +117,19 @@ def parse_diagnosis_response(text: str) -> DeployDiagnosis:
     elif suggested_fix_prompt is not None:
         suggested_fix_prompt = suggested_fix_prompt.strip() or None
 
+    # Phase 5.4: optional, and deliberately lenient — a model that classified the
+    # failure correctly but fumbled this extra field shouldn't lose the whole
+    # diagnosis. Anything unrecognised on an environment failure becomes "other".
+    environment_kind = None
+    if failure_class == "environment":
+        raw_kind = data.get("environment_kind")
+        environment_kind = raw_kind if raw_kind in _ENVIRONMENT_KINDS else "other"
+
     return DeployDiagnosis(
-        diagnosis_text=diagnosis.strip(), failure_class=failure_class, suggested_fix_prompt=suggested_fix_prompt
+        diagnosis_text=diagnosis.strip(),
+        failure_class=failure_class,
+        suggested_fix_prompt=suggested_fix_prompt,
+        environment_kind=environment_kind,
     )
 
 

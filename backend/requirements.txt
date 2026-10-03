@@ -8,6 +8,9 @@ sprites-py==0.7.1  # Fly.io Sprites SDK — the Workspace Service (§23,
   # app/services/workspace_service.py). Pinned to the latest release on PyPI
   # as of this writing (2026-09-17); confirm it still resolves before deploying.
 PyJWT[crypto]==2.10.1
+websockets>=12.0  # Phase 5.3: the Live Preview proxy's WebSocket relay (app/services/preview_proxy.py).
+  # Already installed transitively (uvicorn[standard], sprites-py); listed so the
+  # dependency is explicit rather than accidental.
 python-dotenv==1.0.1
 python-multipart==0.0.20
 litellm==1.55.4  # Phase 3 (§7, §16.2): the LLM wrapper agent_loop.py's call_llm

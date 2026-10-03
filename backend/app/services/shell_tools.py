@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from app.repositories import audit as audit_repo
 from app.repositories import project_secrets as project_secrets_repo
 from app.repositories import projects as projects_repo
-from app.services import checkpoints, workspace_service
+from app.services import checkpoints, preview_secrets_service, workspace_service
 from app.services.guard_rules import (
     GuardResult,
     build_bash_env,
@@ -87,7 +87,13 @@ async def execute_bash(
     timeout_seconds = min(max(timeout_seconds, 1), MAX_TIMEOUT_SECONDS)
 
     all_secrets = await project_secrets_repo.resolve_all_for_project(project_id)
-    guard = classify_command(command, known_secret_values=list(all_secrets.values()))
+    # Phase 5.4: preview secrets are NEVER exported into this command's environment
+    # (they aren't in `all_secrets` and never will be — see
+    # repositories/preview_secrets.py). Their values only join the guard's
+    # "command contains a literal secret value" check, so that if one were ever
+    # learned by some other route it still can't be pasted into a command unasked.
+    preview_values = await preview_secrets_service.get_redaction_values(project_id)
+    guard = classify_command(command, known_secret_values=[*all_secrets.values(), *preview_values.values()])
 
     # "Logged to audit_log with tool = 'bash' on every call regardless of outcome."
     # initiated_by="agent": Phase 3's turn loop (app/services/agent_loop.py) is

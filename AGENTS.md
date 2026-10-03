@@ -10,10 +10,53 @@ reality when you get a chance, don't trust them blindly.
 
 - **Frontend:** Vercel project `quan-harness` → `frontend/` — https://quan-harness-teddyricch247-specs-projects.vercel.app
 - **Backend:** Render web service `Quan-harness` (Python) → `backend/` — https://quan-harness.onrender.com
-- **Database/Auth:** Supabase project `quan-harness` (`skyykzpamsvfjnnbcgjn.supabase.co`, eu-west-1). Migrations `0001` through `0010_deploy_pipeline.sql` are all applied as of 2026-09-29 — confirmed against `information_schema.columns`/`pg_policies`, not assumed. `0009` (Phase 4.5) was dry-run first (the full DDL plus explicit positive/negative tests of both new CHECK constraints, the `sessions.trigger` default, and `schedule_id`'s `ON DELETE SET NULL` behavior, all inside a transaction that was rolled back) before being applied for real via the Supabase MCP connector. `0010_deploy_pipeline.sql` (Phase 5.1/5.2/5.5) was applied and verified on 2026-09-29 (schema, constraints, RLS and cascade all checked against the live project) — see `db/migrations/README.md`.
+- **Database/Auth:** Supabase project `quan-harness` (`skyykzpamsvfjnnbcgjn.supabase.co`, eu-west-1). Migrations `0001` through `0011_preview.sql` are all applied as of 2026-10-02 (`0011` was dry-run in a rolled-back transaction first, then applied and verified against the live schema) — confirmed against `information_schema.columns`/`pg_policies`, not assumed. `0009` (Phase 4.5) was dry-run first (the full DDL plus explicit positive/negative tests of both new CHECK constraints, the `sessions.trigger` default, and `schedule_id`'s `ON DELETE SET NULL` behavior, all inside a transaction that was rolled back) before being applied for real via the Supabase MCP connector. `0010_deploy_pipeline.sql` (Phase 5.1/5.2/5.5) was applied and verified on 2026-09-29 (schema, constraints, RLS and cascade all checked against the live project) — see `db/migrations/README.md`.
 - The previous Render service, Vercel env vars, and Supabase project (an older, schema-incompatible "harness" project) were all deleted and recreated from scratch on 2026-09-20/21. Don't trust anything in chat history or docs dated before that as still being live.
 
-## Most recent change: Phase 5.1/5.2/5.5 Deploy Pipeline, Monorepos & Failure Handling (2026-09-29)
+## Most recent change: Phase 5.3/5.4 Preview Compute & Known Preview Limitations (2026-10-02)
+
+**What changed:** see `docs/PHASE5_3_5_4_NOTES.md` for the full writeup, including the
+**list of live checks that could not be run** (no `FLY_API_TOKEN` yet) and an honest
+statement of what "the agent cannot read preview secrets" does and doesn't guarantee.
+The headline items:
+
+1. New migration `0011_preview.sql` — immutable/unique `projects.preview_subdomain`,
+   `preview_secrets`, `project_notifications`, `deploy_runs.environment_kind`.
+   **Dry-run (25 assertions, rolled back), applied, and verified on the live Supabase
+   project on 2026-10-02.**
+2. The deployed app now runs as a **Sprite service**, not a detached `nohup` — a
+   Sprite's RAM doesn't persist across hibernation, so the old launcher died ~30s
+   after every deploy. (`preview_runtime.py`)
+3. A **host-routed ASGI proxy** (`preview_proxy.py`) serves each project at
+   `<subdomain>.<PREVIEW_BASE_DOMAIN>`: single-use enter token → session cookie,
+   streaming, cold-start retry, WebSocket relay, and hard caps on how long any
+   connection can stay open (an open connection keeps a Sprite billed). Needs
+   `PREVIEW_BASE_DOMAIN` + `PREVIEW_SIGNING_SECRET`; blank = preview off, and the UI
+   says so.
+4. **Preview secrets** (`preview_secrets`) are deliberately a *different table* from
+   `project_secrets`: those are agent-usable, these must never be. Redacted at
+   `agent_loop._execute_call` (fails closed), in stored deploy logs, and in the
+   diagnosis prompt. `test_preview_secret_isolation.py` has static tests that fail if
+   anything agent-facing ever touches them.
+5. **§23.8 notifications** (CORS / secrets / OAuth / database / needs-Docker), all
+   notify-only and opt-in, plus 5.5's "environment failures route to notifications".
+6. Fixes to earlier phases found en route: a **Dockerfile no longer blocks a
+   project** (§23.6 is about commands invoking Docker, not a file existing — this
+   *reverses* what 5.1 did), and the scan script no longer glues a section marker
+   onto a file with no trailing newline (it was silently breaking pnpm/yarn
+   detection).
+
+**If you're an agent about to touch the proxy, the pipeline's start step, or anything
+that handles preview secrets:** read `docs/PHASE5_3_5_4_NOTES.md`'s "Design decisions"
+first. In particular don't (a) reuse `project_secrets` for preview secrets, (b) put an
+env value into a command line, (c) go back to `nohup`, (d) add `url_settings=public`
+anywhere, or (e) let any connection through the proxy stay open indefinitely.
+
+**Not fixed, flagged:** `execute_bash` computes an env dict of agent-usable secrets
+but never passes it to the exec call (`shell_tools.py`) — Phase 2, unrelated to
+preview, and fixing it changes agent-visible behaviour. See the notes.
+
+## Previous change: Phase 5.1/5.2/5.5 Deploy Pipeline, Monorepos & Failure Handling (2026-09-29)
 
 **What changed:** see `docs/PHASE5_1_5_2_5_5_NOTES.md` for the full writeup.
 The headline items:
@@ -37,9 +80,10 @@ The headline items:
    project's next agent turn as read-only context via a new
    `DEPLOY_DIAGNOSIS` system-prompt section — informational only, never
    auto-applied.
-4. A Dockerfile in a repo is now a **deterministic, pre-build** nested-
-   sandboxing case (Sprites aren't Docker-based) — detected and explained
-   before any build is attempted, not discovered via a failed build.
+4. ~~A Dockerfile in a repo is now a deterministic, pre-build nested-sandboxing
+   case.~~ **Superseded in Phase 5.3:** a Dockerfile merely existing no longer blocks
+   anything; nested-container support is declared only when a build/run command
+   invokes Docker or the daemon is unavailable. See `docs/PHASE5_3_5_4_NOTES.md`.
 5. Found and fixed a real, live bug while auditing `exec_in_workspace`'s
    callers: `guard_rules.py`'s duplicated `REPO_ROOT` literal was still the
    Fly Machines-era `/workspace/repo` path, silently mismatched against

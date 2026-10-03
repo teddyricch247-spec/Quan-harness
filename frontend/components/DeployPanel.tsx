@@ -226,6 +226,7 @@ function RunStatus({ run }: { run: DeployRun }) {
           {run.failure_class === "environment" && (
             <p className="text-xs font-medium text-amber-800 mb-1">
               Environment issue — not a code bug, so there is nothing for the agent to fix here.
+              {run.environment_kind && " See Preview notices below for what you can do about it."}
             </p>
           )}
           <p className="mb-2">{run.diagnosis_text}</p>

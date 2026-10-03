@@ -50,6 +50,7 @@ def _run_out(row: dict) -> DeployRunOut:
         stdout=row.get("stdout") or "",
         stderr=row.get("stderr") or "",
         failure_class=row.get("failure_class"),
+        environment_kind=row.get("environment_kind"),
         diagnosis_text=row.get("diagnosis_text"),
         suggested_fix_prompt=row.get("suggested_fix_prompt"),
         created_at=row["created_at"],

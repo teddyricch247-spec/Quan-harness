@@ -99,6 +99,49 @@ here the way the old Fly Machines integration needed.
       vars it needs) — implementation order step 5 explicitly calls for this
       to be verified in isolation before anything else depends on it.
 
+## 3b. Live Preview domain (Phase 5.3 / 5.4 — optional, but needed for the iframe)
+
+Everything else works without this. Without it the Live Preview panel says
+"Live Preview isn't set up on this server yet" instead of showing a broken iframe.
+
+Each project's preview is served from its own stable subdomain,
+`<project-subdomain>.<PREVIEW_BASE_DOMAIN>`, so the previewed app runs at the root of
+its own origin (root-absolute asset paths work) and a client can allowlist that one
+origin for CORS **once**. That needs a domain you control.
+
+- [ ] Pick a domain for previews, e.g. `preview.yourdomain.com`.
+      **Strongly preferred:** serve the frontend on the same registrable domain
+      (e.g. `app.yourdomain.com`). Then the preview iframe is same-site and cookie
+      behaviour is as robust as it gets. If the frontend stays on `*.vercel.app`,
+      the preview is a cross-site iframe and relies on `SameSite=None; Partitioned`
+      cookies — which works in current Chrome/Firefox, but test Safari (see the
+      verification list in `/docs/PHASE5_3_5_4_NOTES.md`).
+- [ ] On the Render backend service: Settings → Custom Domains → add the
+      **wildcard** `*.preview.yourdomain.com`. Render supports wildcard domains and
+      issues the TLS certificate itself; it will show you the exact DNS records to
+      create — at the time of writing, a `*` CNAME to your service's `onrender.com`
+      address plus `_acme-challenge` and `_cf-custom-hostname` CNAMEs (all under
+      `.preview` if you use `preview.yourdomain.com`). Use the values Render shows
+      you, not these names, and mind any CAA records (add `issuewild` entries).
+- [ ] Generate a signing secret: `openssl rand -hex 32`.
+- [ ] Set on the backend: `PREVIEW_BASE_DOMAIN=preview.yourdomain.com`,
+      `PREVIEW_SIGNING_SECRET=<the secret>`, `PREVIEW_SCHEME=https`. Confirm
+      `GET /health` now returns `"preview_configured": true`.
+- [ ] Make sure `FRONTEND_URL` / `CORS_ALLOWED_ORIGINS` list your real frontend
+      origin — the proxy uses them as the **only** origins allowed to embed a
+      preview (CSP `frame-ancestors`).
+- [ ] Optional: `PREVIEW_EGRESS_IPS` (comma-separated). Shown to people who need to
+      allowlist the harness in their database firewall. Leave blank until you know
+      the real egress addresses — the UI says the list isn't configured rather than
+      guessing.
+- [ ] **Do a billing dry run before real users** (the checklist is in
+      `/docs/PHASE5_3_5_4_NOTES.md`). A preview left open is the one way this
+      feature can quietly cost money.
+
+> Never serve previews from the same origin as your frontend or API. The previewed
+> app is user-controlled code; the subdomain isolation is what stops it from
+> touching your app's cookies and storage.
+
 ## 4. Environment variables
 
 Copy each `.env.example` to a real env file and fill it in — see
@@ -109,7 +152,8 @@ inline comments on where each value comes from. Short version:
 `SUPABASE_ANON_KEY`, `SUPABASE_JWT_SECRET` (maybe blank, see above),
 `GITHUB_OAUTH_CLIENT_ID` / `_SECRET`, `SPRITES_API_TOKEN`
 (Phase 2 — §3 above), `FRONTEND_URL`, `BACKEND_PUBLIC_URL`,
-`CORS_ALLOWED_ORIGINS`.
+`CORS_ALLOWED_ORIGINS`; and, only for Live Preview, `PREVIEW_BASE_DOMAIN` +
+`PREVIEW_SIGNING_SECRET` (§3b above).
 
 **frontend/.env.local** needs: `NEXT_PUBLIC_SUPABASE_URL`,
 `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_API_URL`.

@@ -38,11 +38,14 @@ from app.routers import (
     deploy,
     github_credential,
     llm_credentials,
+    preview,
     projects,
     sessions,
     workspace,
 )
 from app.services import scheduler
+from app.services import preview_proxy
+from app.services.preview_proxy import PreviewHostMiddleware
 
 settings = get_settings()
 
@@ -59,11 +62,13 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     yield
     await scheduler.stop()
+    # Phase 5.3: close the Live Preview proxy's upstream HTTP client, if one was ever opened.
+    await preview_proxy.shutdown()
 
 
 app = FastAPI(
     title="Quan Harness API",
-    version="0.4.5-phase4-complete",
+    version="0.5.5-phase5-preview",
     description="Orchestration backend for Quan Harness — Phase 4 complete (4.1-4.5): Memory System, "
     "Project Knowledge, Connector Integration, Auto-Provisioning, Scheduling.",
     lifespan=lifespan,
@@ -77,6 +82,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Phase 5.3 (§23.7): Live Preview. Added LAST so it is the OUTERMOST middleware —
+# every request whose Host is under PREVIEW_BASE_DOMAIN is claimed by the preview
+# gateway before CORS or any router sees it (a preview host must never fall through
+# to the API's own routes), and every other host passes straight through untouched.
+# It's an ASGI middleware rather than a router because the previewed app has to be
+# served from the ROOT of its own origin, and because WebSockets must pass through.
+app.add_middleware(PreviewHostMiddleware)
+
 app.include_router(auth.router)
 app.include_router(account.router)
 app.include_router(llm_credentials.router)
@@ -87,9 +100,10 @@ app.include_router(sessions.router)
 app.include_router(workspace.router)
 app.include_router(agent.router)
 app.include_router(deploy.router)
+app.include_router(preview.router)
 app.include_router(audit_log.router)
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "phase": "4.1-4.5"}
+    return {"status": "ok", "phase": "5.1-5.5", "preview_configured": settings.preview_enabled}

@@ -9,6 +9,9 @@ import ErrorBanner from "@/components/ErrorBanner";
 import WorkspaceShell from "@/components/WorkspaceShell";
 import WorkspaceSyncPanel from "@/components/WorkspaceSyncPanel";
 import DeployPanel from "@/components/DeployPanel";
+import PreviewPanel from "@/components/PreviewPanel";
+import PreviewNotices from "@/components/PreviewNotices";
+import PreviewSecretsPanel from "@/components/PreviewSecretsPanel";
 import { apiFetch, ApiError } from "@/lib/api";
 import { Project } from "@/lib/types";
 
@@ -81,15 +84,12 @@ function ProjectWorkspace() {
         right={
           <div className="space-y-4">
             <DeployPanel project={project} onProjectChanged={() => apiFetch<Project>(`/projects/${project.id}`).then(setProject).catch(() => {})} />
-            <div className="card">
-              <p className="text-sm font-medium mb-1">Live Preview — not built yet</p>
-              <p className="text-sm text-muted">
-                Build/start/failure-diagnosis (§23.5/§23.6/§23.9) are live above (Phase 5.1/5.2/5.5).
-                The proxied iframe view itself (§23's Live Preview proper) is a separate, later
-                sub-prompt (5.3) — for now, a successful deploy means the app is running inside
-                its workspace, just not yet embedded here.
-              </p>
-            </div>
+            <PreviewPanel project={project} />
+            <PreviewNotices
+              project={project}
+              onOpenSecrets={() => document.getElementById("preview-secrets")?.scrollIntoView({ behavior: "smooth", block: "center" })}
+            />
+            <PreviewSecretsPanel project={project} />
           </div>
         }
       />

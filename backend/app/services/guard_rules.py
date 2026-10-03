@@ -61,6 +61,17 @@ def classify_command(command: str, known_secret_values: list[str] | None = None)
         if "sudo" in tokens:
             return GuardResult(True, "sudo is not permitted.")
 
+        # Phase 5.4 (§23.10), defence in depth beyond §14.3's original six rules: a
+        # preview secret lives in the environment of the app's Sprite service, and
+        # these two commands are the ways to read another process's / a service's
+        # environment WITHOUT an absolute path (so the workspace-escape rule below
+        # doesn't already catch them). A speed bump that asks the person, not a
+        # sandbox boundary — see secret_redaction.py and PHASE5_3_5_4_NOTES.md.
+        if _invokes_sprite_env(tokens):
+            return GuardResult(True, "sprite-env manages the sandbox's own services and their environment; it is not permitted here.")
+        if _ps_shows_environment(tokens):
+            return GuardResult(True, "ps with the 'e' option prints other processes' environments; it is not permitted here.")
+
         for marker in _CREDENTIAL_PATH_MARKERS:
             if marker in sub:
                 return GuardResult(True, f"References a known credential file location ({marker}).")
@@ -76,6 +87,33 @@ def classify_command(command: str, known_secret_values: list[str] | None = None)
         return GuardResult(True, "Piping curl/wget output directly into a shell is not permitted.")
 
     return GuardResult(False)
+
+
+_PS_BSD_OPTION_RE = re.compile(r"^[A-Za-z]*e[A-Za-z]*$")
+_PS_VALUE_OPTIONS = frozenset({"-u", "-U", "-C", "-p", "-o", "-t", "-g", "-G", "-s", "-N", "--user", "--pid", "--sort"})
+
+
+def _invokes_sprite_env(tokens: list[str]) -> bool:
+    return any(t == "sprite-env" or t.endswith("/sprite-env") for t in tokens)
+
+
+def _ps_shows_environment(tokens: list[str]) -> bool:
+    """`ps eww`, `ps auxe`, `ps axe` — BSD-style options (no leading dash) containing
+    `e` append each process's environment to its command line. `ps -e` / `ps -ef`
+    (dash = SysV style) only mean "all processes" and are fine."""
+    if not tokens or tokens[0] != "ps":
+        return False
+    previous = ""
+    for arg in tokens[1:]:
+        # The argument of a value-taking option (`ps -u sprite`, `ps -C node`) is a
+        # name, not a BSD option cluster — don't mistake its letters for an `e` flag.
+        takes_value = previous in _PS_VALUE_OPTIONS
+        previous = arg
+        if takes_value or arg.startswith("-"):
+            continue
+        if _PS_BSD_OPTION_RE.match(arg):
+            return True
+    return False
 
 
 def _safe_tokenize(sub_command: str) -> list[str]:
