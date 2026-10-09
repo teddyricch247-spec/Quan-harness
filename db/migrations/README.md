@@ -1,7 +1,13 @@
 # Running these migrations
 
-**Status as of 2026-10-02:** `0001` through `0011_preview.sql` are all
-applied to the live `quan-harness` Supabase project. `0011` (Phase 5.3/5.4) was
+**Status as of 2026-10-08:** `0001` through `0012_llm_provider_presets.sql` are all
+applied to the live `quan-harness` Supabase project. `0012` (BYOK provider presets) only
+widens `llm_credentials_provider_check` to a strict superset of the old list, so it touches
+no rows and no policies; it was dry-run in a rolled-back transaction first (all 12 provider ids
+accepted, 4 invalid values rejected — checked by distinguishing `check_violation` from the
+FK error a fake `user_id` produces), the rollback was confirmed against the live constraint,
+then it was applied via the Supabase MCP connector and the live constraint re-read.
+Previous status: `0001` through `0011_preview.sql` were applied. `0011` (Phase 5.3/5.4) was
 dry-run first — the full DDL plus 25 positive/negative assertions (the
 subdomain immutability trigger, uniqueness and format checks, every CHECK
 constraint, RLS isolation between two users, cascade delete) inside a
@@ -32,7 +38,7 @@ Postgres database. Two ways to do it — pick whichever you're comfortable with:
 3. Repeat for `0002_connections.sql`, `0003_vault_helpers.sql`, `0004_projects.sql`,
    `0005_sessions.sql`, `0006_workspace_tools.sql`, `0007_memory_and_project_knowledge.sql`,
    `0008_connector_oauth_client.sql`, `0009_scheduling.sql`, `0010_deploy_pipeline.sql`,
-   `0011_preview.sql`, in that order.
+   `0011_preview.sql`, `0012_llm_provider_presets.sql`, in that order.
 
 **Option B — Supabase CLI**
 ```bash

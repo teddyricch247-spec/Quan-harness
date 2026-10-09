@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # ---------------------------------------------------------------------------
 # Auth (§4, §28)
@@ -30,7 +30,56 @@ class AccountDeleteRequest(BaseModel):
 # LLM credentials (§7, §10.1)
 # ---------------------------------------------------------------------------
 
-LlmProvider = Literal["anthropic", "openai", "google", "openrouter", "custom"]
+# Must match provider_catalog.PROVIDER_IDS and the latest llm_credentials_provider_check
+# migration — tests/test_provider_catalog.py fails if any of the three drift.
+LlmProvider = Literal[
+    "openrouter",
+    "anthropic",
+    "openai",
+    "google",
+    "groq",
+    "together",
+    "fireworks",
+    "deepseek",
+    "mistral",
+    "xai",
+    "cerebras",
+    "custom",
+]
+
+
+ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
+
+
+class ReasoningConfig(BaseModel):
+    """How a credential's model should think. Stored on llm_credentials.reasoning (jsonb).
+
+    Every field is optional and "unset" means "the model's own default" — nothing is sent
+    to the provider for it. So `{}` (all defaults) is the native behaviour, and is what
+    resetting to default stores. Which `effort` values a given model really accepts is
+    checked against provider_catalog.reasoning_profile in the router, not here.
+    """
+
+    effort: ReasoningEffort | None = None  # "none" = thinking off
+    max_tokens: int | None = Field(default=None, ge=1024, le=32768)  # a raw thinking budget
+    show: bool = True  # False = ask the provider not to return the thinking text
+
+    @model_validator(mode="after")
+    def _effort_xor_budget(self):
+        if self.effort is not None and self.max_tokens is not None:
+            raise ValueError("Set either a thinking level or a token budget, not both.")
+        return self
+
+    def to_stored(self) -> dict:
+        """Only the non-default keys, so an untouched credential stores exactly `{}`."""
+        out: dict = {}
+        if self.effort is not None:
+            out["effort"] = self.effort
+        if self.max_tokens is not None:
+            out["max_tokens"] = self.max_tokens
+        if not self.show:
+            out["show"] = False
+        return out
 
 
 class LlmCredentialCreate(BaseModel):
@@ -41,6 +90,7 @@ class LlmCredentialCreate(BaseModel):
     base_url: str | None = None
     extra_headers: dict[str, str] = Field(default_factory=dict)
     is_default: bool = False
+    reasoning: ReasoningConfig | None = None
 
 
 class LlmCredentialUpdate(BaseModel):
@@ -49,6 +99,30 @@ class LlmCredentialUpdate(BaseModel):
     api_key: str | None = None  # if provided, rotates the stored secret (§24)
     base_url: str | None = None
     extra_headers: dict[str, str] | None = None
+    reasoning: ReasoningConfig | None = None  # an all-default object resets to the model's own behaviour
+
+
+class LlmProbeRequest(BaseModel):
+    provider: LlmProvider
+    api_key: str
+    base_url: str | None = None  # only used (and required) for provider == "custom"
+
+
+class LlmModelOut(BaseModel):
+    id: str
+    name: str
+    context_length: int | None = None
+    supports_tools: bool | None = None  # None = the provider didn't say
+    supports_reasoning: bool | None = None  # None = the provider didn't say
+
+
+class LlmProbeOut(BaseModel):
+    # ok | invalid_key | no_model_list | unreachable | bad_request — see provider_probe.py.
+    # Only invalid_key/bad_request mean "fix this before connecting"; the rest still
+    # allow connecting with a manually typed model ID.
+    status: str
+    message: str | None = None
+    models: list[LlmModelOut] = Field(default_factory=list)
 
 
 class LlmCredentialOut(BaseModel):
@@ -62,6 +136,10 @@ class LlmCredentialOut(BaseModel):
     api_key_last_four: str
     created_at: datetime
     updated_at: datetime
+    reasoning: dict[str, Any] = Field(default_factory=dict)
+    # What this credential's model natively accepts ({"efforts": [...], "supports_budget": bool}),
+    # or None when the provider has no thinking controls. Derived, never stored.
+    reasoning_options: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------

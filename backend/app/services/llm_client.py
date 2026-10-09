@@ -22,14 +22,24 @@ production, the same instruction /docs/YOUR_SETUP_CHECKLIST.md already gives
 for the Fly integration.
 """
 import asyncio
+import logging
+import re
 from dataclasses import dataclass, field
 
 from app.repositories import llm_credentials as llm_credentials_repo
-from app.services import vault
+from app.services import provider_catalog, vault
+
+logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
 RETRY_BASE_DELAY_SECONDS = 2.0
 DEFAULT_CONTEXT_WINDOW = 128_000  # used only if litellm's own model lookup fails — see get_context_window
+DEFAULT_MAX_COMPLETION_TOKENS = 8192
+# When thinking is switched on, the completion cap has to cover the thinking tokens too
+# (OpenRouter sizes an effort level as a share of max_tokens), so a thinking model is
+# given more room — but never more than this, and never more than the model's own cap.
+THINKING_MAX_COMPLETION_TOKENS = 24_576
+THINKING_ANSWER_HEADROOM = 4096  # room left for the answer / tool call on top of a raw thinking budget
 
 
 class NoLlmCredentialError(RuntimeError):
@@ -50,6 +60,8 @@ class ResolvedCredential:
     api_key: str
     base_url: str | None
     extra_headers: dict
+    # Stored llm_credentials.reasoning — {} means "the model's own default behaviour".
+    reasoning: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -66,6 +78,11 @@ class LlmResponse:
     stop_reason: str | None = None
     input_tokens: int = 0
     output_tokens: int = 0
+    # The model's thinking text, when the provider returned any (and the credential didn't
+    # ask for it to be hidden). Extracted here, but agent_loop.py does not store or show it
+    # yet — see docs/LING_THINKING_NOTES.md for the small patch that does. Never fed back
+    # to the model either way.
+    reasoning: str = ""
 
 
 async def resolve_credential(project: dict) -> ResolvedCredential:
@@ -92,19 +109,110 @@ async def resolve_credential(project: dict) -> ResolvedCredential:
         api_key=api_key,
         base_url=row.get("base_url"),
         extra_headers=row.get("extra_headers") or {},
+        reasoning=row.get("reasoning") or {},
     )
 
 
-# provider -> litellm model-string prefix. "custom" is treated as an
-# OpenAI-compatible HTTP surface (the common case for a self-hosted or
-# third-party endpoint reached via api_base) — a real design choice, not
-# something §7 spells out; see /docs/PHASE3_NOTES.md.
-_LITELLM_PREFIX = {"anthropic": "anthropic", "openai": "openai", "google": "gemini", "openrouter": "openrouter", "custom": "openai"}
+# provider -> litellm model-string prefix now lives on each preset in
+# provider_catalog.py (one declaration per provider, instead of this map plus the DB
+# CHECK plus the schema Literal plus a frontend array). "custom" is still treated as
+# an OpenAI-compatible HTTP surface (the common case for a self-hosted or third-party
+# endpoint reached via api_base) — a real design choice, not something §7 spells
+# out; see /docs/PHASE3_NOTES.md. Unknown providers fall back to "openai" as before.
 
 
 def _litellm_model_string(credential: ResolvedCredential) -> str:
-    prefix = _LITELLM_PREFIX.get(credential.provider, "openai")
-    return f"{prefix}/{credential.model}"
+    return f"{provider_catalog.litellm_prefix(credential.provider)}/{credential.model}"
+
+
+# ---------------------------------------------------------------------------
+# Thinking controls (OpenRouter's unified `reasoning` request object)
+# ---------------------------------------------------------------------------
+
+
+def build_reasoning_body(credential: ResolvedCredential) -> dict | None:
+    """The `reasoning` object to send, or None to send nothing (the model's own default).
+
+    Only OpenRouter has a uniform thinking API across models, so only OpenRouter
+    credentials get one; every other provider returns None regardless of what is stored.
+    Effort and a token budget are mutually exclusive (the schema enforces it on the way
+    in; this takes effort if a hand-edited row somehow carries both).
+    """
+    if credential.provider != "openrouter":
+        return None
+    cfg = credential.reasoning or {}
+    body: dict = {}
+    effort = cfg.get("effort")
+    budget = cfg.get("max_tokens")
+    if effort:
+        body["effort"] = effort
+    elif budget:
+        body["max_tokens"] = int(budget)
+    if cfg.get("show") is False:
+        body["exclude"] = True
+    return body or None
+
+
+def completion_token_cap(credential: ResolvedCredential, reasoning_body: dict | None) -> int:
+    """max_tokens for the call. 8192 as always, unless thinking is actually on — then the
+    cap must leave room for the thinking itself or the answer (or tool call) gets starved."""
+    thinking_on = bool(reasoning_body) and reasoning_body.get("effort") != "none" and (
+        "effort" in reasoning_body or "max_tokens" in reasoning_body
+    )
+    if not thinking_on:
+        return DEFAULT_MAX_COMPLETION_TOKENS
+    profile = provider_catalog.reasoning_profile(credential.provider, credential.model)
+    model_cap = profile.max_output_tokens if profile else None
+    cap = THINKING_MAX_COMPLETION_TOKENS
+    if "max_tokens" in reasoning_body:
+        cap = max(cap, int(reasoning_body["max_tokens"]) + THINKING_ANSWER_HEADROOM)
+    if model_cap:
+        cap = min(cap, model_cap)
+    return cap
+
+
+_REASONING_REJECTION = re.compile(r"reason|effort|thinking", re.I)
+
+
+def _looks_like_reasoning_rejection(exc: Exception) -> bool:
+    """A provider refusing the thinking level we asked for (an effort it doesn't know, a
+    budget it can't take) — as opposed to a network blip or a bad key. Deliberately a text
+    match: litellm surfaces these as assorted BadRequest shapes per provider."""
+    if getattr(exc, "status_code", None) not in (400, 422):
+        return False  # includes "no status at all" (timeouts, DNS) — never a thinking-level problem
+    return bool(_REASONING_REJECTION.search(str(exc)))
+
+
+def _strip_reasoning_level(kwargs: dict) -> bool:
+    """Drop the effort/budget from an in-flight request (keeping `exclude`), so the model
+    falls back to its own default thinking. True if there was something to drop."""
+    body = (kwargs.get("extra_body") or {}).get("reasoning")
+    if not body or not ({"effort", "max_tokens"} & set(body)):
+        return False
+    remaining = {k: v for k, v in body.items() if k not in ("effort", "max_tokens")}
+    if remaining:
+        kwargs["extra_body"] = {**kwargs["extra_body"], "reasoning": remaining}
+    else:
+        kwargs["extra_body"] = {k: v for k, v in kwargs["extra_body"].items() if k != "reasoning"} or None
+        if kwargs["extra_body"] is None:
+            del kwargs["extra_body"]
+    kwargs["max_tokens"] = DEFAULT_MAX_COMPLETION_TOKENS
+    return True
+
+
+def _extract_reasoning(message) -> str:
+    """The model's thinking text from a litellm message, whichever field the provider path
+    used: litellm's normalised `reasoning_content`, OpenRouter's raw `reasoning`, or either
+    tucked into `provider_specific_fields`. Empty string if there is none."""
+    candidates = [getattr(message, "reasoning_content", None), getattr(message, "reasoning", None)]
+    extra = getattr(message, "provider_specific_fields", None)
+    if isinstance(extra, dict):
+        candidates += [extra.get("reasoning_content"), extra.get("reasoning")]
+    for value in candidates:
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
 
 
 def _to_function_tools(tool_schemas: list[dict]) -> list[dict]:
@@ -199,12 +307,17 @@ async def call_llm(
 
     model_string = _litellm_model_string(credential)
     messages = _apply_prompt_caching(messages, credential)
+    reasoning_body = build_reasoning_body(credential)
     kwargs = {
         "model": model_string,
         "messages": messages,
         "api_key": credential.api_key,
-        "max_tokens": 8192,
+        "max_tokens": completion_token_cap(credential, reasoning_body),
     }
+    if reasoning_body:
+        # extra_body is litellm's pass-through into the provider's request JSON, which is
+        # how OpenRouter's unified `reasoning` object reaches it unchanged.
+        kwargs["extra_body"] = {"reasoning": reasoning_body}
     if tools:
         kwargs["tools"] = _to_function_tools(tools)
         kwargs["tool_choice"] = tool_choice
@@ -220,6 +333,14 @@ async def call_llm(
             return _normalize_response(response)
         except Exception as exc:  # noqa: BLE001 — any provider/network failure is retried identically
             last_error = exc
+            # A thinking level the model refuses must not take the whole turn down: retry
+            # once, immediately, with the model's own default thinking instead.
+            if _looks_like_reasoning_rejection(exc) and _strip_reasoning_level(kwargs):
+                logger.warning(
+                    "%s/%s rejected the configured thinking level (%s); retrying with the model default",
+                    credential.provider, credential.model, type(exc).__name__,
+                )
+                continue
             if attempt < MAX_RETRIES - 1:
                 await asyncio.sleep(RETRY_BASE_DELAY_SECONDS * (2**attempt))
     raise LlmCallFailedError(f"{credential.provider}/{credential.model}: {last_error}") from last_error
@@ -245,4 +366,5 @@ def _normalize_response(response) -> LlmResponse:
         stop_reason=choice.finish_reason,
         input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
         output_tokens=getattr(usage, "completion_tokens", 0) or 0,
+        reasoning=_extract_reasoning(message),
     )

@@ -1,7 +1,10 @@
 export interface LlmCredential {
   id: string;
   label: string;
-  provider: "anthropic" | "openai" | "google" | "openrouter" | "custom";
+  // A preset id from GET /connections/llm-credentials/providers (the backend's
+  // provider_catalog.py is the source of truth) — deliberately `string`, not a union,
+  // so adding a provider there doesn't need a matching edit here.
+  provider: string;
   model: string;
   base_url: string | null;
   extra_headers: Record<string, string>;
@@ -9,6 +12,61 @@ export interface LlmCredential {
   api_key_last_four: string;
   created_at: string;
   updated_at: string;
+  // Thinking settings; {} = the model's own default. See ReasoningConfig.
+  reasoning: ReasoningConfig;
+  // What this credential's model natively accepts, or null if its provider has no thinking controls.
+  reasoning_options: ReasoningOptions | null;
+}
+
+// effort: "none" = thinking off; a level and a token budget are mutually exclusive;
+// show === false asks the provider not to return the thinking text.
+export interface ReasoningConfig {
+  effort?: string | null;
+  max_tokens?: number | null;
+  show?: boolean;
+}
+
+export interface ReasoningOptions {
+  efforts: string[]; // native levels, weakest first ("none" first when thinking can be turned off)
+  supports_budget: boolean;
+}
+
+export interface LlmQuickModel {
+  id: string;
+  provider: string;
+  model: string;
+  name: string;
+  blurb: string;
+  free: boolean;
+  note: string | null;
+  reasoning: ReasoningOptions | null;
+}
+
+export interface LlmProviderPreset {
+  id: string;
+  name: string;
+  blurb: string;
+  key_url: string | null;
+  model_placeholder: string;
+  key_prefix_hint: string | null; // soft hint only — never validate against it
+  requires_base_url: boolean;
+  recommended: boolean;
+  reasoning: ReasoningOptions | null; // generic thinking levels for this provider's models
+}
+
+export interface LlmModel {
+  id: string;
+  name: string;
+  context_length: number | null;
+  supports_tools: boolean | null; // null = the provider didn't say
+  supports_reasoning: boolean | null; // null = the provider didn't say
+}
+
+export interface LlmProbeResult {
+  // ok | invalid_key | no_model_list | unreachable | bad_request
+  status: string;
+  message: string | null;
+  models: LlmModel[];
 }
 
 export interface GithubCredential {

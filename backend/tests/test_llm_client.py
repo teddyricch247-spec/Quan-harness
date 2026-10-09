@@ -20,6 +20,13 @@ def test_model_string_mapping_per_provider():
     assert _litellm_model_string(_cred("openrouter", "anthropic/claude-sonnet-4-6")) == "openrouter/anthropic/claude-sonnet-4-6"
 
 
+def test_model_string_mapping_for_preset_providers():
+    assert _litellm_model_string(_cred("groq", "llama-3.3-70b-versatile")) == "groq/llama-3.3-70b-versatile"
+    assert _litellm_model_string(_cred("together", "meta-llama/Llama-3.3-70B-Instruct-Turbo")) == "together_ai/meta-llama/Llama-3.3-70B-Instruct-Turbo"
+    assert _litellm_model_string(_cred("fireworks", "accounts/fireworks/models/x")) == "fireworks_ai/accounts/fireworks/models/x"
+    assert _litellm_model_string(_cred("deepseek", "deepseek-chat")) == "deepseek/deepseek-chat"
+
+
 def test_custom_provider_treated_as_openai_compatible():
     assert _litellm_model_string(_cred("custom", "my-self-hosted-model")) == "openai/my-self-hosted-model"
 

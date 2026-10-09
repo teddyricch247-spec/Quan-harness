@@ -13,7 +13,45 @@ reality when you get a chance, don't trust them blindly.
 - **Database/Auth:** Supabase project `quan-harness` (`skyykzpamsvfjnnbcgjn.supabase.co`, eu-west-1). Migrations `0001` through `0011_preview.sql` are all applied as of 2026-10-02 (`0011` was dry-run in a rolled-back transaction first, then applied and verified against the live schema) — confirmed against `information_schema.columns`/`pg_policies`, not assumed. `0009` (Phase 4.5) was dry-run first (the full DDL plus explicit positive/negative tests of both new CHECK constraints, the `sessions.trigger` default, and `schedule_id`'s `ON DELETE SET NULL` behavior, all inside a transaction that was rolled back) before being applied for real via the Supabase MCP connector. `0010_deploy_pipeline.sql` (Phase 5.1/5.2/5.5) was applied and verified on 2026-09-29 (schema, constraints, RLS and cascade all checked against the live project) — see `db/migrations/README.md`.
 - The previous Render service, Vercel env vars, and Supabase project (an older, schema-incompatible "harness" project) were all deleted and recreated from scratch on 2026-09-20/21. Don't trust anything in chat history or docs dated before that as still being live.
 
-## Most recent change: Phase 5.3/5.4 Preview Compute & Known Preview Limitations (2026-10-02)
+## Most recent change: Ling 3.1 Flash quick-connect + native thinking controls (2026-10-08)
+
+Full writeup, including everything **not** verified: `docs/LING_THINKING_NOTES.md`. Headline:
+
+1. `provider_catalog.py` gained `QUICK_MODELS` (one-tap "paste only your key" connections — first
+   entry: OpenRouter `inclusionai/ling-3.1-flash`, free) and `ReasoningProfile`/`MODEL_REASONING`
+   (the native thinking levels per model). New endpoint `GET /connections/llm-credentials/quick-models`.
+2. Per-credential thinking config in `llm_credentials.reasoning` (jsonb); sent as OpenRouter's
+   unified `reasoning` object via litellm `extra_body`; a rejected level falls back to the model
+   default once instead of failing the turn.
+3. Migration `0013_llm_reasoning_config.sql`. **The live Supabase history has migrations that are not
+   in this repo** (`0012_workspace_fingerprint`, `session_attachments`, `rls_cross_reference_checks`,
+   `rls_audit`, `phase6_advisor_fixes`) — check `list_migrations` before assuming this folder is the
+   whole story.
+4. Not done: storing/showing the thinking text in a session (see the notes doc for the patch).
+
+## Previous change: BYOK provider presets (2026-10-08)
+
+**What changed:** connecting an LLM key is now preset-driven instead of "pick one of five
+and hand-type the model ID and base URL".
+
+1. `backend/app/services/provider_catalog.py` is the **single source of truth** for providers
+   (OpenRouter, Anthropic, OpenAI, Google, Groq, Together, Fireworks, DeepSeek, Mistral, xAI,
+   Cerebras, Custom). `llm_client._litellm_model_string` reads its prefix from there; the
+   frontend fetches the list from `GET /connections/llm-credentials/providers`.
+2. `provider_probe.py` + `POST /connections/llm-credentials/probe` (and `/{id}/probe` for a saved
+   key) check a key against the provider's own model-list endpoint and return the models, with a
+   per-model `supports_tools` flag where the provider reports it. A probe is advice, never a gate.
+3. Migration `0012_llm_provider_presets.sql` widens the provider CHECK. **Applied and verified on
+   the live Supabase project 2026-10-08.**
+4. `tests/test_provider_catalog.py` fails if the catalog, `schemas.LlmProvider` and the latest
+   migration's CHECK drift — adding a provider means touching all three (see the catalog's docstring).
+
+**Not run / flagged:** nothing here has been exercised against a live key of every provider
+(no network in the build environment) — endpoint URLs and key-prefix hints come from provider docs.
+`create_credential` and `call_llm` don't SSRF-guard a saved custom `base_url` (only the new probe
+does); that predates this change. The Render backend must be redeployed for the new endpoints.
+
+## Previous change: Phase 5.3/5.4 Preview Compute & Known Preview Limitations (2026-10-02)
 
 **What changed:** see `docs/PHASE5_3_5_4_NOTES.md` for the full writeup, including the
 **list of live checks that could not be run** (no `FLY_API_TOKEN` yet) and an honest
