@@ -147,19 +147,11 @@ class QuickModel:
         return d
 
 
-QUICK_MODELS: tuple[QuickModel, ...] = (
-    QuickModel(
-        id="ling-3.1-flash",
-        provider="openrouter",
-        model="inclusionai/ling-3.1-flash",
-        name="Ling 3.1 Flash",
-        blurb="Free on OpenRouter. 560B hybrid-reasoning MoE, 262k context, tool calling.",
-        free=True,
-        # OpenRouter's own listing says free-of-charge until Oct 13, 2026 (9:00 AM PT) per the
-        # launch announcement; the price is read from OpenRouter, so it is a note not logic.
-        note="Free-tier pricing was announced as running until Oct 13, 2026 — check OpenRouter's model page after that.",
-    ),
-)
+# One-tap connections shown on the LLM Providers page: provider + model are preset, the person only
+# pastes their OWN key. The team curates this list. Add a QuickModel(...) here (set free=True only for a
+# model that is genuinely free on the person's own key today, and say where that can change in `note`).
+# Empty on purpose for now — the page simply hides the section when there is nothing to show.
+QUICK_MODELS: tuple[QuickModel, ...] = ()
 
 
 PRESETS: tuple[ProviderPreset, ...] = (

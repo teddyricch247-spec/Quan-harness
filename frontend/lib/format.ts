@@ -14,7 +14,7 @@ export function timeAgo(iso: string | null | undefined, now: Date = new Date()):
   return then.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-/** "inclusionai/ling-3.1-flash" → "ling-3.1-flash" — the tail of a provider/model id, for a chip. */
+/** "provider/model-name" → "model-name" — the tail of a provider/model id, for a chip. */
 export function shortModel(model: string | null | undefined): string {
   if (!model) return "";
   const tail = model.split("/").pop() ?? model;

@@ -137,7 +137,7 @@ function LlmProvidersManager() {
   const [label, setLabel] = useState("");
   const [isDefault, setIsDefault] = useState(false);
   const [busy, setBusy] = useState(false);
-  // One-tap connection (e.g. Ling 3.1 Flash): provider + model are preset, only the key is typed.
+  // One-tap connection (a model the team lists): provider + model are preset, only the key is typed.
   const [quick, setQuick] = useState<LlmQuickModel | null>(null);
   const [reasoning, setReasoning] = useState<ReasoningConfig>({});
 

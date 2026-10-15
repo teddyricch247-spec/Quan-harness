@@ -28,13 +28,11 @@ def _cred(provider="openrouter", model=LING, reasoning=None) -> ResolvedCredenti
 # --- catalog ---------------------------------------------------------------
 
 
-def test_ling_quick_model_points_at_the_exact_openrouter_slug():
-    quick = catalog.get_quick_model("ling-3.1-flash")
-    assert quick is not None
-    assert (quick.provider, quick.model) == ("openrouter", LING)
-    assert quick.free is True
-    # the quick model must resolve to a real preset, or "paste only the key" can't connect
-    assert catalog.get_preset(quick.provider) is not None
+def test_every_quick_model_points_at_a_real_preset():
+    # "paste only the key" can only connect if the quick model resolves to a real provider preset
+    for quick in catalog.QUICK_MODELS:
+        assert catalog.get_preset(quick.provider) is not None
+        assert catalog.get_quick_model(quick.id) is quick
 
 
 def test_ling_has_every_native_level_and_can_be_switched_off():
@@ -55,10 +53,9 @@ def test_non_openrouter_providers_have_no_thinking_controls():
         assert catalog.reasoning_profile(pid, "anything") is None
 
 
-def test_public_quick_models_expose_levels_but_no_routing_internals():
-    (entry,) = catalog.public_quick_models()
-    assert entry["reasoning"]["efforts"][0] == "none"
-    assert "litellm_prefix" not in entry and "models_url" not in entry
+def test_public_quick_models_expose_no_routing_internals():
+    for entry in catalog.public_quick_models():
+        assert "litellm_prefix" not in entry and "models_url" not in entry
 
 
 def test_every_profile_effort_is_a_value_openrouter_defines():
