@@ -1,0 +1,354 @@
+# PARKED — not collected by pytest (the .txt suffix is deliberate).
+#
+# This is the Phase 6.1 agent-loop wiring test exactly as produced against the original Phase 5.8 base. The Phase 5.x modules it
+# patches (`agent_loop.visual_qa`, `visual_qa_rules.BrowserAvailability`) now exist as a reconstruction, so the only thing stopping
+# it is its harness: it extends `World` from tests/test_agent_loop_phase5_wiring.py, which was lost with the original 5.x tests and
+# has not been rebuilt. When that harness exists, move this to backend/tests/test_agent_loop_image_input.py and check the patches
+# against the reconstructed modules (docs/PHASE5_6_5_7_5_8_NOTES.md).
+#
+# It covers: attachments claimed and linked on start_turn / send_interrupt, rollback on a failed append, the vision
+# gate, the retry-without-pictures path, and that a text-only turn is untouched.
+#
+"""Phase 6.1 — image input on user messages, driven through the REAL `_run_inner` turn loop and the real
+`start_turn` / `send_interrupt` / `image_input_problem` (same in-memory-doubles approach as
+test_agent_loop_phase5_wiring.py, whose World this extends):
+
+  * a picture attached to a message reaches a vision-capable model as an image part ON THE USER'S MESSAGE, and its
+    pixels are never in the event log
+  * a model that can't read images is never sent one: the picture is a note, and the person is told once
+  * only the most recent pictures are sent
+  * a provider that rejects images is retried once without them; only a SUCCESSFUL retry turns image input off for
+    the session, and an outage doesn't
+  * a session with no attachments pays nothing (no vision lookup, no query) and its messages are unchanged
+  * attachments are claimed atomically before the message is written, linked to it afterwards, and given back if
+    the message never got written
+  * the vision gate the router uses
+
+What this does NOT cover: a real provider's reaction to an image, a real database (the claim/link functions are
+exercised against the live database by the migration's dry run, see docs/PHASE6_NOTES.md), the HTTP layer."""
+import asyncio
+from types import SimpleNamespace as NS
+from unittest import mock
+
+import pytest
+
+from app.services import agent_loop, image_input, llm_client
+from app.services.visual_qa_rules import BrowserAvailability
+from tests.test_agent_loop_phase5_wiring import World, resp
+
+URI = "data:image/png;base64,AAAA-REAL-PIXELS-NEVER-IN-THE-LOG"
+
+
+def att(i, name=None):
+    return {"id": f"att-{i}", "filename": name or f"shot{i}.png", "media_type": "image/png", "width": 10, "height": 10, "byte_size": 100}
+
+
+def user_msg(i, text="the header is cut off", attachments=()):
+    content = {"text": text}
+    if attachments:
+        content["attachments"] = list(attachments)
+    return {"id": i, "session_id": "S1", "role": "user", "event_type": "message", "content": content, "parent_event_id": None}
+
+
+class ImgWorld(World):
+    def __init__(self, responses, *, supports_vision=True, images=None, **kw):
+        super().__init__(responses, **kw)
+        self.supports_vision = supports_vision
+        self.images = images if images is not None else {}
+        self.load_calls: list[tuple[str, list[str]]] = []
+        self.vision_checks = 0
+
+    async def load_data_uris(self, session_id, ids):
+        self.load_calls.append((session_id, list(ids)))
+        return {i: self.images[i] for i in ids if i in self.images}
+
+    def check_vision(self, credential):
+        self.vision_checks += 1
+        return self.supports_vision
+
+    def patches(self):
+        A = agent_loop
+        return super().patches() + [
+            mock.patch.object(A.session_attachments_repo, "load_data_uris", self.load_data_uris),
+            mock.patch.object(A.visual_qa, "credential_supports_vision", self.check_vision),
+            mock.patch.object(A, "_image_input_notified", set()),
+        ]
+
+
+def _errors(world, code):
+    return [e for e in world.events if e["event_type"] == "error" and e["content"].get("code") == code]
+
+
+def _image_parts(messages):
+    return [p for m in messages if isinstance(m.get("content"), list) for p in m["content"] if p.get("type") == "image_url"]
+
+
+# ---------------------------------------------------------------------------------------------------------
+# the loop
+# ---------------------------------------------------------------------------------------------------------
+
+
+def test_an_attached_picture_reaches_a_vision_model_as_an_image_on_the_users_message_and_is_never_logged():
+    w = ImgWorld([resp("I can see the cut-off header.")], images={"att-1": URI}, events=[user_msg(1, attachments=[att(1)])]).run()
+
+    assert w.finished == [("completed", "I can see the cut-off header.")]
+    messages = w.llm_calls[0][0]
+    user = next(m for m in messages if m["role"] == "user")
+    assert [p["type"] for p in user["content"]] == ["text", "image_url"]
+    assert user["content"][0]["text"].startswith("the header is cut off")
+    assert user["content"][1]["image_url"]["url"] == URI
+    assert w.load_calls == [("S1", ["att-1"])]  # fetched for THIS session only
+    assert "PIXELS" not in str(w.events) and "base64" not in str(w.events)  # pixels live in session_attachments, never in an event
+
+
+def test_the_picture_is_shown_again_on_every_iteration_of_the_turn():
+    w = ImgWorld([resp(calls=[("view_file", {"path": "a.css"})]), resp("fixed")], images={"att-1": URI}, events=[user_msg(1, attachments=[att(1)])]).run()
+    assert len(w.llm_calls) == 2
+    assert all(len(_image_parts(messages)) == 1 for messages, _tools in w.llm_calls)
+
+
+def test_a_model_that_cannot_read_images_is_never_sent_one_and_the_person_is_told_exactly_once():
+    w = ImgWorld(
+        [resp(calls=[("view_file", {"path": "a"})]), resp(calls=[("view_file", {"path": "b"})]), resp("done")],
+        supports_vision=False, images={"att-1": URI}, events=[user_msg(1, attachments=[att(1, "bug.png")])],
+    ).run()
+
+    assert len(w.llm_calls) == 3
+    assert w.load_calls == []                                          # the pixels were never even fetched
+    for messages, _tools in w.llm_calls:
+        assert not _image_parts(messages)
+        user = next(m for m in messages if m["role"] == "user")
+        assert isinstance(user["content"], str) and "bug.png" in user["content"] and "not shown to you" in user["content"]
+    notices = _errors(w, "image_input_no_vision")
+    assert len(notices) == 1 and notices[0]["content"]["fatal"] is False and "fake/model" in notices[0]["content"]["text"]
+
+
+def test_only_the_most_recent_pictures_are_sent():
+    events = [user_msg(i, f"msg {i}", [att(i)]) for i in range(1, 9)]
+    w = ImgWorld([resp("ok")], images={f"att-{i}": f"data:image/png;base64,P{i}" for i in range(1, 9)}, events=events).run()
+
+    (_session, loaded), = w.load_calls
+    assert loaded == [f"att-{i}" for i in range(8, 8 - image_input.MAX_IMAGES_IN_CONTEXT, -1)]  # newest first, capped
+    messages = w.llm_calls[0][0]
+    assert len(_image_parts(messages)) == image_input.MAX_IMAGES_IN_CONTEXT
+    oldest = next(m for m in messages if m["role"] == "user" and "msg 1" in str(m["content"]))
+    assert isinstance(oldest["content"], str) and "not shown to you" in oldest["content"]  # an older picture is a note
+
+
+def test_a_session_with_no_attachments_pays_nothing_and_its_messages_are_unchanged():
+    w = ImgWorld([resp("hi")], events=[user_msg(1, "check the home page")]).run()
+    assert w.vision_checks == 0 and w.load_calls == []
+    assert next(m for m in w.llm_calls[0][0] if m["role"] == "user")["content"] == "check the home page"
+
+
+BROWSER_OFF = BrowserAvailability(False, "server_off", "The browser tools are off on this server.", "", False)
+
+
+def test_a_provider_that_rejects_the_picture_is_retried_once_without_it_and_image_input_stays_off_for_the_session():
+    w = ImgWorld(
+        [resp(calls=[("view_file", {"path": "a"})]), resp("done without seeing it")],
+        images={"att-1": URI}, events=[user_msg(1, attachments=[att(1)])], availability=BROWSER_OFF,
+    )
+    w.fail_when_images = True
+    w.run()
+
+    assert w.finished == [("completed", "done without seeing it")]
+    assert len(w.llm_calls) == 3                                       # rejected, retried without, then the next iteration
+    assert _image_parts(w.llm_calls[0][0]) and not _image_parts(w.llm_calls[1][0]) and not _image_parts(w.llm_calls[2][0])
+    assert len(w.load_calls) == 1                                      # never fetched again after the rejection
+    assert "S1" in w.rejected_sessions
+    rejected = _errors(w, "image_input_rejected")
+    assert len(rejected) == 1 and rejected[0]["content"]["fatal"] is False
+    # the browser was never on here, so nothing was "switched off" and the person is not told that it was
+    assert not [e for e in w.events if e["event_type"] == "error" and "browser" in e["content"].get("text", "").lower()]
+
+
+def test_when_the_browser_tools_were_on_a_rejected_picture_still_switches_them_off_as_before():
+    w = ImgWorld(
+        [resp(calls=[("view_file", {"path": "a"})]), resp("done")],
+        images={"att-1": URI}, events=[user_msg(1, attachments=[att(1)])],  # default availability: browser available
+    )
+    w.fail_when_images = True
+    w.run()
+    assert "S1" in w.rejected_sessions and len(_errors(w, "image_input_rejected")) == 1
+    assert [e for e in w.events if e["event_type"] == "error" and "browser tools were switched off" in e["content"].get("text", "")]  # the existing notice
+
+
+def test_an_outage_is_not_mistaken_for_a_rejected_picture():
+    w = ImgWorld(
+        [llm_client.LlmCallFailedError("503 upstream")], images={"att-1": URI}, events=[user_msg(1, attachments=[att(1)])]
+    )
+    w.fail_when_images = True
+    w.run()
+
+    assert w.finished == [] and w.session["status"] == "failed"
+    assert "S1" not in w.rejected_sessions and not _errors(w, "image_input_rejected")
+
+
+# ---------------------------------------------------------------------------------------------------------
+# entry points: start_turn / send_interrupt
+# ---------------------------------------------------------------------------------------------------------
+
+
+class Entry:
+    """start_turn / send_interrupt with every collaborator replaced."""
+
+    def __init__(self, *, claim_result="ok", append_error=None, read_only=False):
+        self.claim_result, self.append_error, self.read_only = claim_result, append_error, read_only
+        self.appended: list[dict] = []
+        self.claimed: list[tuple] = []
+        self.linked: list[tuple] = []
+        self.released: list[tuple] = []
+        self.spawned: list[tuple] = []
+
+    async def get_owned(self, user_id, session_id):
+        return {"id": session_id, "read_only": self.read_only}
+
+    async def append(self, session_id, role, event_type, content, parent_event_id=None):
+        if self.append_error:
+            raise self.append_error
+        event = {"id": 77, "session_id": session_id, "role": role, "event_type": event_type, "content": content}
+        self.appended.append(event)
+        return event
+
+    async def claim(self, session_id, ids, token):
+        self.claimed.append((session_id, list(ids), token))
+        if self.claim_result is None:
+            return None
+        return [{**att(int(i.split("-")[1])), "id": i, "message_event_id": token, "data_b64": "SHOULD-NOT-BE-IN-THE-EVENT"} for i in ids]
+
+    async def link(self, session_id, token, event_id):
+        self.linked.append((session_id, token, event_id))
+
+    async def release(self, session_id, token):
+        self.released.append((session_id, token))
+
+    def run(self, coro_fn):
+        A = agent_loop
+        patches = [
+            mock.patch.object(A.sessions_repo, "get_owned", self.get_owned),
+            mock.patch.object(A.session_events_repo, "append", self.append),
+            mock.patch.object(A.session_attachments_repo, "claim_unlinked", self.claim),
+            mock.patch.object(A.session_attachments_repo, "link", self.link),
+            mock.patch.object(A.session_attachments_repo, "release", self.release),
+            mock.patch.object(A.session_attachments_repo, "new_claim_token", lambda: -5),
+            mock.patch.object(A.session_attachments_repo, "event_metadata", lambda row: {k: row[k] for k in ("id", "filename", "media_type", "width", "height", "byte_size")}),
+            mock.patch.object(A, "_spawn", lambda sid, uid: self.spawned.append((sid, uid))),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            return asyncio.run(coro_fn())
+        finally:
+            for p in patches:
+                p.stop()
+            agent_loop._release_session("SX")
+
+
+def test_start_turn_without_attachments_writes_exactly_what_it_always_did():
+    e = Entry()
+    assert e.run(lambda: agent_loop.start_turn("SX", "U1", "hello")) is True
+    assert e.appended[0]["content"] == {"text": "hello"}
+    assert e.claimed == [] and e.linked == [] and e.spawned == [("SX", "U1")]
+
+
+def test_start_turn_claims_the_pictures_writes_metadata_only_then_links_them_to_the_event():
+    e = Entry()
+    assert e.run(lambda: agent_loop.start_turn("SX", "U1", "look", ["att-2", "att-1"])) is True
+
+    assert e.claimed == [("SX", ["att-2", "att-1"], -5)]
+    content = e.appended[0]["content"]
+    assert [a["id"] for a in content["attachments"]] == ["att-2", "att-1"]            # the order the person attached them
+    assert "SHOULD-NOT-BE-IN-THE-EVENT" not in str(e.appended)                         # pixels never reach the log
+    assert e.linked == [("SX", -5, 77)] and e.released == [] and e.spawned == [("SX", "U1")]
+
+
+def test_unusable_attachments_write_nothing_and_leave_the_session_free_to_try_again():
+    e = Entry(claim_result=None)
+    with pytest.raises(agent_loop.AttachmentsUnavailable):
+        e.run(lambda: agent_loop.start_turn("SX", "U1", "look", ["att-1"]))
+    assert e.appended == [] and e.linked == [] and e.spawned == []
+    assert agent_loop.is_running("SX") is False                                        # the session claim was released
+
+
+def test_too_many_pictures_are_refused_before_anything_is_claimed():
+    e = Entry()
+    ids = [f"att-{i}" for i in range(image_input.MAX_IMAGES_PER_MESSAGE + 1)]
+    with pytest.raises(agent_loop.AttachmentsUnavailable):
+        e.run(lambda: agent_loop.start_turn("SX", "U1", "look", ids))
+    assert e.claimed == [] and e.appended == []
+
+
+def test_if_the_message_cannot_be_written_the_claimed_pictures_are_given_back():
+    e = Entry(append_error=RuntimeError("db down"))
+    with pytest.raises(RuntimeError):
+        e.run(lambda: agent_loop.start_turn("SX", "U1", "look", ["att-1"]))
+    assert e.released == [("SX", -5)] and e.linked == [] and agent_loop.is_running("SX") is False
+
+
+def test_a_read_only_session_claims_nothing():
+    e = Entry(read_only=True)
+    assert e.run(lambda: agent_loop.start_turn("SX", "U1", "look", ["att-1"])) is False
+    assert e.claimed == [] and e.appended == []
+
+
+def test_an_interrupt_can_carry_a_picture_too():
+    e = Entry()
+    assert e.run(lambda: agent_loop.send_interrupt("SX", "U1", "wait, look at this", ["att-1"])) is True
+    event = e.appended[0]
+    assert event["event_type"] == "user_interrupt" and [a["id"] for a in event["content"]["attachments"]] == ["att-1"]
+    assert e.linked == [("SX", -5, 77)]
+
+
+def test_an_interrupt_whose_event_cannot_be_written_gives_the_pictures_back():
+    e = Entry(append_error=RuntimeError("db down"))
+    with pytest.raises(RuntimeError):
+        e.run(lambda: agent_loop.send_interrupt("SX", "U1", "x", ["att-1"]))
+    assert e.released == [("SX", -5)]
+
+
+# ---------------------------------------------------------------------------------------------------------
+# the vision gate the router uses
+# ---------------------------------------------------------------------------------------------------------
+
+
+def _gate(*, project=None, own_row=None, default_row=None, vision=True, rejected=False):
+    A = agent_loop
+    project = {"id": "P1", "llm_credential_id": "C1"} if project is None else project
+    row = {"id": "C1", "provider": "anthropic", "model": "claude-x"}
+    patches = [
+        mock.patch.object(A.projects_repo, "get_by_id", mock.AsyncMock(return_value=project)),
+        mock.patch.object(A.llm_credentials_repo, "get_for_user", mock.AsyncMock(return_value=row if own_row is None else own_row or None)),
+        mock.patch.object(A.llm_credentials_repo, "get_default_for_user", mock.AsyncMock(return_value=default_row)),
+        mock.patch.object(A.visual_qa, "credential_supports_vision", lambda c: vision),
+        mock.patch.object(A.visual_qa, "model_string", lambda c: f"{c.provider}/{c.model}"),
+        mock.patch.object(A, "_vision_rejected_sessions", {"S1"} if rejected else set()),
+    ]
+    for p in patches:
+        p.start()
+    try:
+        return asyncio.run(agent_loop.image_input_problem("U1", {"id": "S1", "project_id": "P1"}))
+    finally:
+        for p in patches:
+            p.stop()
+
+
+def test_the_gate_allows_a_model_confirmed_to_read_images():
+    assert _gate(vision=True) is None
+
+
+def test_the_gate_refuses_with_the_model_name_and_both_fixes_when_vision_is_not_confirmed():
+    message = _gate(vision=False)
+    assert "anthropic/claude-x" in message and "Connections → LLM Providers" in message and "AGENT_VISION_MODELS" in message
+
+
+def test_the_gate_refuses_after_the_provider_has_rejected_images_in_this_session():
+    assert "AGENT_VISION_MODELS" in _gate(vision=True, rejected=True)
+
+
+def test_the_gate_uses_the_account_default_when_the_project_has_no_credential_of_its_own():
+    assert _gate(project={"id": "P1", "llm_credential_id": None}, default_row={"id": "C9", "provider": "openai", "model": "gpt-x"}, vision=True) is None
+
+
+def test_the_gate_says_so_when_no_provider_is_connected_at_all():
+    assert "No LLM provider" in _gate(project={"id": "P1", "llm_credential_id": None}, default_row=None)

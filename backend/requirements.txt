@@ -1,0 +1,37 @@
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+pydantic==2.10.3
+pydantic-settings==2.7.0
+supabase==2.10.0
+httpx==0.27.2
+sprites-py==0.7.1  # Fly.io Sprites SDK — the Workspace Service (§23,
+  # app/services/workspace_service.py). Pinned to the latest release on PyPI
+  # as of this writing (2026-09-17); confirm it still resolves before deploying.
+PyJWT[crypto]==2.10.1
+websockets>=12.0  # Phase 5.3: the Live Preview proxy's WebSocket relay (app/services/preview_proxy.py).
+  # Already installed transitively (uvicorn[standard], sprites-py); listed so the
+  # dependency is explicit rather than accidental.
+python-dotenv==1.0.1
+python-multipart==0.0.20
+openai==1.57.4  # litellm 1.55.4 only declares openai>=1.55.3; the last Render build resolved
+  # that to openai 3.26.1, which this old litellm was never tested against.
+litellm==1.55.4  # Phase 3 (§7, §16.2): the LLM wrapper agent_loop.py's call_llm
+  # goes through — one interface across Anthropic/OpenAI/Google/OpenRouter/a
+  # custom endpoint. Version pinned to what was current when this was written;
+  # not verified against a real installed copy in this environment (no
+  # network — see /docs/PHASE3_NOTES.md), so confirm it still resolves before
+  # deploying.
+croniter==2.0.5  # Phase 4.5 (§26): parses a schedule's custom cron-style
+  # expression (app/services/scheduler_rules.py) — standard 5-field crontab
+  # syntax, interpreted in UTC. A small, long-established, pure-Python
+  # dependency; not verified against a real installed copy in this
+  # environment (no network — the same standing gap the litellm comment
+  # above flags), so confirm it still resolves before deploying, same as
+  # every other pin in this file.
+
+# Optional (Phase 2, §22's tree-sitter parse-error check) — not installed by
+# default; see /docs/PHASE2_NOTES.md's rough-edges section for why. Uncomment
+# to enable the language-agnostic syntax-check pass ahead of the built-in
+# Python/JS-heuristic fallbacks in app/services/text_edit.py:
+# tree-sitter==0.23.2
+# tree-sitter-languages==1.10.2

@@ -1,0 +1,7 @@
+# OPTIONAL — only for the agent's own browser (Phase 5.8, §14.9; AGENT_BROWSER_ENABLED=true). See docs/YOUR_SETUP_CHECKLIST.md §3c.
+# The package alone is not enough: Chromium is a separate download (`playwright install chromium`) and needs system libraries.
+# Not installed by default — the base build stays small and the feature stays off.
+#
+# Pinned to a release that was current when this was written (2026-10-13); NOT verified against a real install in this
+# environment (no network). Confirm it resolves, and keep the Chromium download in step with the package version.
+playwright==1.49.1

@@ -1,0 +1,125 @@
+# Phase 6.2 (§5, Implementation Order step 20) — account-isolation verification, in CI.
+#
+#   "an automated suite connects to Postgres as the authenticated role using two distinct real test-account JWTs ...
+#    run in CI on every pull request touching a table's schema or policies."
+#
+# WHEN IT RUNS
+#   * every pull request that touches db/migrations/** (every schema or policy change lives there), the isolation
+#     tests themselves, or the code that talks to those tables (repositories/, routers/);
+#   * on pushes to main with the same paths;
+#   * WEEKLY, regardless of changes — a policy edited by hand in the Supabase dashboard never appears in a pull
+#     request, and this is the only thing that would notice;
+#   * on demand (Actions -> Isolation -> Run workflow).
+#   NOTE for branch protection: a workflow with a `paths` filter does not report at all on a pull request that
+#   touches none of those paths, so do not mark it a *required* check unless you also drop the filter.
+#
+# TWO JOBS
+#   raw-rls  needs only the anon key and the two throwaway accounts — NOT the service role key (which bypasses RLS and
+#            would prove nothing). Runs test_rls_isolation.py (the original suite), test_isolation_matrix.py (every
+#            table x every attack, plus the catalog guards) and test_isolation_concurrency.py.
+#   api      runs the real backend in-process and calls it as account B with account A's ids. That needs the service
+#            role key, so it is OFF until you set the repository VARIABLE ISOLATION_API_ENABLED=true — and the key you
+#            give it must be a DEDICATED test project's, never production's (see docs/PHASE6_NOTES.md).
+#
+# SECRETS (Settings -> Secrets and variables -> Actions)
+#   ISOLATION_SUPABASE_URL, ISOLATION_SUPABASE_ANON_KEY
+#   ISOLATION_TEST_ACCOUNT_A_EMAIL, _A_PASSWORD, _B_EMAIL, _B_PASSWORD
+#   api job only: ISOLATION_SUPABASE_SERVICE_ROLE_KEY, ISOLATION_SUPABASE_JWT_SECRET
+#
+# ISOLATION_REQUIRED=1 makes a missing secret a FAILURE, not a skip: a run that silently tested nothing must not be green.
+
+name: Isolation
+
+on:
+  pull_request:
+    paths:
+      - "db/migrations/**"
+      - "backend/tests/test_rls_isolation.py"
+      - "backend/tests/test_isolation_*.py"
+      - "backend/tests/isolation_registry.py"
+      - "backend/tests/conftest.py"
+      - "backend/app/repositories/**"
+      - "backend/app/routers/**"
+      - ".github/workflows/isolation.yml"
+  push:
+    branches: [main]
+    paths:
+      - "db/migrations/**"
+      - "backend/tests/test_rls_isolation.py"
+      - "backend/tests/test_isolation_*.py"
+      - "backend/tests/isolation_registry.py"
+      - "backend/tests/conftest.py"
+      - "backend/app/repositories/**"
+      - "backend/app/routers/**"
+      - ".github/workflows/isolation.yml"
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run at a time: every run signs in as the same two accounts against the same database.
+concurrency:
+  group: isolation-database
+  cancel-in-progress: false
+
+jobs:
+  raw-rls:
+    name: Raw RLS (anon key + two accounts)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ISOLATION_REQUIRED: "1"
+      SUPABASE_URL: ${{ secrets.ISOLATION_SUPABASE_URL }}
+      SUPABASE_ANON_KEY: ${{ secrets.ISOLATION_SUPABASE_ANON_KEY }}
+      TEST_ACCOUNT_A_EMAIL: ${{ secrets.ISOLATION_TEST_ACCOUNT_A_EMAIL }}
+      TEST_ACCOUNT_A_PASSWORD: ${{ secrets.ISOLATION_TEST_ACCOUNT_A_PASSWORD }}
+      TEST_ACCOUNT_B_EMAIL: ${{ secrets.ISOLATION_TEST_ACCOUNT_B_EMAIL }}
+      TEST_ACCOUNT_B_PASSWORD: ${{ secrets.ISOLATION_TEST_ACCOUNT_B_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+      - name: Install
+        working-directory: backend
+        run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Isolation tests (raw RLS)
+        working-directory: backend
+        run: pytest tests/test_rls_isolation.py tests/test_isolation_matrix.py tests/test_isolation_concurrency.py -v --tb=short
+
+  api:
+    name: Direct API calls (real backend, in-process)
+    if: ${{ vars.ISOLATION_API_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ISOLATION_REQUIRED: "1"
+      SUPABASE_URL: ${{ secrets.ISOLATION_SUPABASE_URL }}
+      SUPABASE_ANON_KEY: ${{ secrets.ISOLATION_SUPABASE_ANON_KEY }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.ISOLATION_SUPABASE_SERVICE_ROLE_KEY }}
+      SUPABASE_JWT_SECRET: ${{ secrets.ISOLATION_SUPABASE_JWT_SECRET }}
+      TEST_ACCOUNT_A_EMAIL: ${{ secrets.ISOLATION_TEST_ACCOUNT_A_EMAIL }}
+      TEST_ACCOUNT_A_PASSWORD: ${{ secrets.ISOLATION_TEST_ACCOUNT_A_PASSWORD }}
+      TEST_ACCOUNT_B_EMAIL: ${{ secrets.ISOLATION_TEST_ACCOUNT_B_EMAIL }}
+      TEST_ACCOUNT_B_PASSWORD: ${{ secrets.ISOLATION_TEST_ACCOUNT_B_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+      - name: Install
+        working-directory: backend
+        run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Isolation tests (API path)
+        working-directory: backend
+        run: pytest tests/test_isolation_api.py -v --tb=short -s

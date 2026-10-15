@@ -1,0 +1,260 @@
+from starlette.concurrency import run_in_threadpool
+
+from app.db import get_service_client
+
+TABLE = "projects"
+WORKSPACES_TABLE = "project_workspaces"
+ACCESS_TABLE = "project_mcp_access"
+
+
+async def list_for_user(user_id: str) -> list[dict]:
+    client = get_service_client()
+
+    def _call():
+        return client.table(TABLE).select("*").eq("user_id", user_id).order("created_at").execute().data
+
+    return await run_in_threadpool(_call)
+
+
+async def get_for_user(user_id: str, project_id: str) -> dict | None:
+    client = get_service_client()
+
+    def _call():
+        rows = (
+            client.table(TABLE)
+            .select("*")
+            .eq("user_id", user_id)
+            .eq("id", project_id)
+            .limit(1)
+            .execute()
+            .data
+        )
+        return rows[0] if rows else None
+
+    return await run_in_threadpool(_call)
+
+
+async def get_by_id(project_id: str) -> dict | None:
+    """Unscoped lookup for internal service-to-service calls whose caller has
+    already verified ownership on the way in (e.g. a router handler that called
+    get_for_user first) — same pattern as get_workspace() below. Never call this
+    directly from a router in place of get_for_user."""
+    client = get_service_client()
+
+    def _call():
+        rows = client.table(TABLE).select("*").eq("id", project_id).limit(1).execute().data
+        return rows[0] if rows else None
+
+    return await run_in_threadpool(_call)
+
+
+async def create(user_id: str, row: dict) -> dict:
+    client = get_service_client()
+
+    def _call():
+        payload = {**row, "user_id": user_id}
+        return client.table(TABLE).insert(payload).execute().data[0]
+
+    return await run_in_threadpool(_call)
+
+
+async def update_for_user(user_id: str, project_id: str, fields: dict) -> dict | None:
+    client = get_service_client()
+
+    def _call():
+        rows = (
+            client.table(TABLE)
+            .update(fields)
+            .eq("user_id", user_id)
+            .eq("id", project_id)
+            .execute()
+            .data
+        )
+        return rows[0] if rows else None
+
+    return await run_in_threadpool(_call)
+
+
+async def delete_for_user(user_id: str, project_id: str) -> bool:
+    """§24: 'Removes Quan Harness's own record and every session/credential-
+    selection/checkpoint tied to it (cascading per §10's foreign keys). Does not
+    touch the actual GitHub repository or the underlying Fly.io Sprite's own
+    billing account resource.'"""
+    client = get_service_client()
+
+    def _call():
+        rows = (
+            client.table(TABLE)
+            .delete()
+            .eq("user_id", user_id)
+            .eq("id", project_id)
+            .execute()
+            .data
+        )
+        return len(rows) > 0
+
+    return await run_in_threadpool(_call)
+
+
+async def create_workspace_stub(project_id: str, sprite_handle: str) -> dict:
+    """Phase 1 only creates the row so the schema linkage is real — no actual
+    Fly.io Sprite gets provisioned until the Workspace Service (Phase 2)."""
+    client = get_service_client()
+
+    def _call():
+        return (
+            client.table(WORKSPACES_TABLE)
+            .insert({"project_id": project_id, "sprite_handle": sprite_handle, "billing_state": "cold"})
+            .execute()
+            .data[0]
+        )
+
+    return await run_in_threadpool(_call)
+
+
+async def get_workspace(project_id: str) -> dict | None:
+    client = get_service_client()
+
+    def _call():
+        rows = (
+            client.table(WORKSPACES_TABLE)
+            .select("*")
+            .eq("project_id", project_id)
+            .limit(1)
+            .execute()
+            .data
+        )
+        return rows[0] if rows else None
+
+    return await run_in_threadpool(_call)
+
+
+async def update_workspace(project_id: str, fields: dict) -> dict:
+    """Phase 2: workspace_service.py calls this as it provisions/wakes/sleeps the
+    real Fly.io Sprite behind a project — sprite_handle moves from Phase 1's
+    `pending-*` placeholder to a real Sprite name here, and billing_state starts
+    reflecting the Sprite's own reported status (constrained to 'running'/'warm'/
+    'cold' below in the table's own check constraint — see 0004_projects.sql)."""
+    client = get_service_client()
+
+    def _call():
+        return (
+            client.table(WORKSPACES_TABLE)
+            .update(fields)
+            .eq("project_id", project_id)
+            .execute()
+            .data[0]
+        )
+
+    return await run_in_threadpool(_call)
+
+
+async def set_harness_branch_ready(project_id: str) -> None:
+    """§25: flips once Push creates `harness/workspace` for the first time, so
+    later Pushes know to update it rather than create-then-push."""
+    client = get_service_client()
+
+    def _call():
+        client.table(TABLE).update({"harness_branch_ready": True}).eq("id", project_id).execute()
+
+    await run_in_threadpool(_call)
+
+
+async def set_deploy_targets(project_id: str, targets: list[dict], confirmed: bool) -> dict:
+    """§23.6 — either the proposed-but-unconfirmed shape (confirmed=False,
+    written so a person re-opening the confirmation UI sees what was last
+    proposed rather than nothing) or the person's own confirmed shape
+    (confirmed=True, from then on used as-is on every deploy — "no repeated
+    inference at deploy time"). Also used by deploy_pipeline.py to write the
+    auto-confirmed single-root shape for a 'scratch'-origin project, and to
+    persist a target's resolved build_cmd/run_cmd/port back onto
+    deploy_targets once §23.5's detection has run for it once."""
+    client = get_service_client()
+
+    def _call():
+        return (
+            client.table(TABLE)
+            .update({"deploy_targets": targets, "deploy_targets_confirmed": confirmed})
+            .eq("id", project_id)
+            .execute()
+            .data[0]
+        )
+
+    return await run_in_threadpool(_call)
+
+
+async def get_connector_access(project_id: str) -> list[str]:
+    client = get_service_client()
+
+    def _call():
+        rows = client.table(ACCESS_TABLE).select("mcp_server_id").eq("project_id", project_id).execute().data
+        return [r["mcp_server_id"] for r in rows]
+
+    return await run_in_threadpool(_call)
+
+
+async def set_connector_access(project_id: str, connector_ids: list[str]) -> None:
+    """§9.3: 'a plain many-to-many toggle from the project's Settings, not a copy of
+    the server's configuration.' Replaces the full grant set in one operation."""
+    client = get_service_client()
+
+    def _call():
+        client.table(ACCESS_TABLE).delete().eq("project_id", project_id).execute()
+        if connector_ids:
+            client.table(ACCESS_TABLE).insert(
+                [{"project_id": project_id, "mcp_server_id": cid} for cid in connector_ids]
+            ).execute()
+
+    await run_in_threadpool(_call)
+
+
+async def grant_connector_access(project_id: str, connector_ids: list[str]) -> None:
+    """Used by the New Project flow (§12 step 3) — additive, project starts with none."""
+    if not connector_ids:
+        return
+    client = get_service_client()
+
+    def _call():
+        client.table(ACCESS_TABLE).insert(
+            [{"project_id": project_id, "mcp_server_id": cid} for cid in connector_ids]
+        ).execute()
+
+    await run_in_threadpool(_call)
+
+
+async def get_by_preview_subdomain(subdomain: str) -> dict | None:
+    """Phase 5.3: the Live Preview proxy's own lookup — a request arrives for
+    `<subdomain>.<preview-domain>` and the only thing known about it is the
+    subdomain. Unscoped by user for the same reason get_by_id is: the proxy is a
+    service-to-service caller that authenticates the *request* itself (the signed
+    session cookie, see preview_tokens.py), not via a user JWT."""
+    client = get_service_client()
+
+    def _call():
+        rows = client.table(TABLE).select("*").eq("preview_subdomain", subdomain).limit(1).execute().data
+        return rows[0] if rows else None
+
+    return await run_in_threadpool(_call)
+
+
+async def set_preview_subdomain_if_unset(project_id: str, subdomain: str) -> dict | None:
+    """Assigns the stable preview subdomain exactly once. The `is null` guard in
+    the query plus 0011_preview.sql's immutability trigger mean a value that's
+    already set can never be overwritten — "allowlist it once" depends on that.
+    Returns the updated row, or None if one was already set (or a unique-index
+    collision made the insert lose — the caller just retries with a new random
+    suffix)."""
+    client = get_service_client()
+
+    def _call():
+        rows = (
+            client.table(TABLE)
+            .update({"preview_subdomain": subdomain})
+            .eq("id", project_id)
+            .is_("preview_subdomain", "null")
+            .execute()
+            .data
+        )
+        return rows[0] if rows else None
+
+    return await run_in_threadpool(_call)

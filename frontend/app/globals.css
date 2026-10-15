@@ -1,0 +1,63 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body {
+  background-color: #f4f4f4;
+  color: #161616;
+  font-size: 15px;
+  line-height: 1.45;
+  /* §11's mobile-quality requirement: nothing may scroll sideways, and the shell sizes itself to
+     the dynamic viewport (100dvh) rather than 100vh so the mobile browser's own bars don't clip it. */
+  overflow-x: hidden;
+}
+
+* {
+  border-color: #e1e1e1;
+}
+
+.card {
+  @apply border border-line bg-white rounded-xl p-4;
+}
+
+.btn {
+  @apply inline-flex items-center justify-center rounded-lg border border-line px-4 py-2 text-sm font-medium transition-colors min-h-[36px];
+}
+
+.btn-primary {
+  @apply btn bg-ink text-white border-ink hover:bg-black;
+}
+
+.btn-default {
+  @apply btn bg-white text-ink hover:bg-paper;
+}
+
+.btn-danger {
+  @apply btn bg-white text-accent border-accent hover:bg-accent-soft;
+}
+
+.input {
+  @apply w-full rounded-lg border border-line px-3 py-2 text-sm bg-white focus:outline-none focus:ring-1 focus:ring-ink;
+}
+
+.label {
+  @apply block text-xs font-medium text-muted mb-1;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* A row inside a sheet or list: whole-row tap target of at least 44px, hairline divider. */
+.row {
+  @apply flex w-full items-center gap-3 px-4 py-3 text-left border-b border-line bg-transparent min-h-[44px];
+}
+
+button:focus-visible,
+a:focus-visible,
+textarea:focus-visible,
+input:focus-visible {
+  outline: 2px solid #161616;
+  outline-offset: 2px;
+}
