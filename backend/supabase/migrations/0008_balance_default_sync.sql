@@ -1,0 +1,35 @@
+-- Found during the 2026-09-15 audit (item 9c: a drift between this
+-- column's default and app/billing.py's DEFAULT_STARTING_BALANCE that
+-- both files' own comments claim doesn't exist).
+--
+-- 0004_billing.sql set balance_usd's default to 5.00000 and said "kept
+-- in sync with DEFAULT_STARTING_BALANCE in app/billing.py." billing.py
+-- currently defines DEFAULT_STARTING_BALANCE = Decimal("0.00000") and
+-- makes the same "keep in sync" claim about THIS column. They've
+-- clearly diverged — likely 5.00000 was an earlier product decision (a
+-- free signup credit) from before DEFAULT_STARTING_BALANCE was changed
+-- to 0, with only the Python side actually getting updated.
+--
+-- Confirmed functionally harmless today: app/billing.py's
+-- _create_account() always passes an explicit balance_usd on insert
+-- (float(DEFAULT_STARTING_BALANCE)), so this column default is never
+-- actually read by this app's own code path — it would only matter for
+-- a row inserted some OTHER way (a manual SQL insert, a future code
+-- path that adds an account without setting balance_usd explicitly).
+-- That's exactly the scenario worth closing rather than leaving open:
+-- an accidental future reliance on this default would silently hand
+-- out a real $5.00 of credit that DEFAULT_STARTING_BALANCE says
+-- shouldn't exist, not a cosmetic mismatch.
+--
+-- Fix (not "remove the sync comment" — the two SHOULD stay in sync,
+-- keeping that as the stated intent is the safer property going
+-- forward): bring the column default down to match the Python side,
+-- rather than giving up on the two ever agreeing.
+--
+-- Not yet applied to the live project as of writing this file (unlike
+-- 0002-0006, applied directly via the Supabase MCP tool before being
+-- committed here) — left for a deliberate decision to run it, same as
+-- 0007, since it's a live production DDL change outside the scope of
+-- file edits this pass was meant to make unilaterally.
+alter table public.billing_accounts
+  alter column balance_usd set default 0.00000;

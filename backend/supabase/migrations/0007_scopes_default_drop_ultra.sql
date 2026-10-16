@@ -1,0 +1,30 @@
+-- Found during the 2026-09-15 audit (item 4: verify the live schema
+-- against what the code actually assumes). No table shape change, no
+-- data change — one more stale column default, same category of fix
+-- as 0005_kael_aura_rename_cleanup.sql, which this one is a direct
+-- follow-up to.
+--
+-- 0005 fixed api_keys.scopes' default from {flash, pro, ultra} down to
+-- {pro, ultra} when the Flash tier was deleted, reasoning explicitly
+-- that "a fresh row's default listing a product that can't exist is
+-- worth fixing." Aura Beta (internal key "ultra") was deleted the same
+-- way shortly after (see app/models/__init__.py's docstring) — 0005
+-- itself wasn't revisited when that happened, so the same problem it
+-- had just fixed for 'flash' quietly came back for 'ultra': every new
+-- API key created today still gets scopes={pro, ultra} by default,
+-- naming a product that no longer exists.
+--
+-- Confirmed via the live schema (2026-09-15) that this is still
+-- cosmetic, not a live authorization bug, same as 0005 already noted:
+-- app/api_keys.py doesn't gate anything on scopes today ("any active
+-- key works against any endpoint"). Fixing it anyway while touching
+-- this exact area, for the same reason 0005 did.
+--
+-- Not yet applied to the live project as of writing this file (unlike
+-- 0002-0006, which were all applied directly via the Supabase MCP tool
+-- before being committed here) — this one is left for a deliberate
+-- decision to run it, since it's a live production DDL change and
+-- outside the scope of file edits this pass was meant to make
+-- unilaterally.
+alter table public.api_keys
+  alter column scopes set default array['pro']::text[];

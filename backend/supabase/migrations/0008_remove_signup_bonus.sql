@@ -1,0 +1,26 @@
+-- Removes the automatic $5 free-credit-on-signup: new accounts should
+-- start at $0 and only carry a real balance once a real deposit (and,
+-- while the deposit-match promo is running, its matching bonus — see
+-- app/billing.py's DEPOSIT_MATCH_PCT/DEPOSIT_MATCH_DEADLINE) has been
+-- credited to them.
+--
+-- 0004_billing.sql is already applied to the live project (per its own
+-- header comment), so its `default 5.00000` is edited here via a new
+-- migration rather than rewritten in place — that file stays an
+-- accurate historical record of what was actually run.
+--
+-- This only changes the COLUMN DEFAULT, which in practice is a backstop:
+-- app/billing.py's _create_account always sends an explicit
+-- balance_usd (from DEFAULT_STARTING_BALANCE, now Decimal("0.00000")) on
+-- every insert, so the app itself never relied on this default. It only
+-- matters if a billing_accounts row is ever inserted some other way
+-- (e.g. directly in the Supabase SQL editor) — updated here so that path
+-- can't silently hand out a stale $5 either.
+--
+-- Does NOT touch any existing account's current balance_usd — this is a
+-- default for FUTURE inserts only. If any already-created account was
+-- never touched (no deposit, no usage) and is still sitting at the old
+-- $5 default, decide separately whether to zero those out; this
+-- migration doesn't do that automatically.
+alter table public.billing_accounts
+  alter column balance_usd set default 0.00000;

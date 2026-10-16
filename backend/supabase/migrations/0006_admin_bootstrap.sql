@@ -1,0 +1,37 @@
+-- Bootstraps the first real admin account for the new admin backend
+-- (prompt-5-admin-backend.md / app/admin.py / app/auth.py's require_admin,
+-- 2026-08-23). No schema change — this is a data write into a column
+-- GoTrue already owns and exposes exactly for this purpose
+-- (app_metadata, writable only with the service_role key).
+--
+-- Already applied against the live Supabase project (ref + the real
+-- admin email both intentionally redacted below as of 2026-09-15 — see
+-- "PII" note further down) via the Supabase MCP tool, same as how
+-- 0004/0005 describe their own changes as confirmed-applied rather than
+-- pending. Nothing to run manually against the current live project.
+-- This file exists so the change is versioned and reproducible on a
+-- fresh project — replace the placeholder email below with the real
+-- address before running it there.
+--
+-- Confirmed result on the live project at the time this was applied:
+-- the target auth.users row now has
+-- raw_app_meta_data = {"role": "admin", "provider": "email", "providers": ["email"]}
+-- (the provider/providers keys were already there from email sign-up;
+-- the merge below preserves them rather than overwriting the column).
+--
+-- Note on the line below: `update ... where email = '...'` against a
+-- project where that email hasn't signed up yet already matches zero
+-- rows and is a safe no-op on its own — Postgres doesn't need an extra
+-- `where exists (...)` guard for that. (An earlier version of this
+-- comment claimed one was present; it wasn't, and none was actually
+-- needed — corrected 2026-09-15.) The row count in the query result is
+-- still the tell for whether it actually matched.
+--
+-- PII, 2026-09-15: this file used to spell out both the real admin
+-- email and the live project ref in plain text. Redacted — this repo
+-- gets shared with contractors. Substitute the real email below from
+-- internal ops notes (not source control) before running this against
+-- a real project.
+update auth.users
+set raw_app_meta_data = raw_app_meta_data || jsonb_build_object('role', 'admin')
+where email = '<admin email — fill in from internal ops notes before running>';
