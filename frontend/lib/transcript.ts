@@ -102,6 +102,131 @@ export function buildRows(events: SessionEvent[]): Row[] {
   return rows;
 }
 
+/**
+ * What the transcript shows. The agent's *work* (every tool call, and the narration it writes
+ * between tool calls) is folded into one collapsed "activity" line per run, the way Claude shows
+ * "Read a file, ran 10 commands". Everything the person has to act on or read stays a plain row.
+ */
+export type Item =
+  | { kind: "row"; row: Row }
+  | { kind: "activity"; id: number; rows: Row[] };
+
+/**
+ * Fold the agent's work into activity groups.
+ *
+ * Folded:  tool calls, and agent text that is followed by another tool call in the same turn
+ *          ("Now let me check the CDN URLs…" — narration, not an answer).
+ * Visible: the person's own messages; the agent's text once no tool call follows it (that is the
+ *          reply); approvals, answered or not (the person must see what was asked and decided);
+ *          errors; "stuck" notices.
+ *
+ * Consecutive folded rows form one group. A visible row ends the group, so the order of events
+ * stays honest: [work] [approval] [more work] [reply].
+ */
+export function groupRows(rows: Row[]): Item[] {
+  // Walking backwards, `toolAhead` says whether a tool call comes later in the same turn (a user
+  // row starts a new turn, so it resets the flag for everything before it).
+  const folded: boolean[] = new Array(rows.length).fill(false);
+  let toolAhead = false;
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const r = rows[i];
+    if (r.kind === "user") toolAhead = false;
+    folded[i] = r.kind === "tool" || (r.kind === "agent" && toolAhead);
+    if (r.kind === "tool") toolAhead = true;
+  }
+
+  const items: Item[] = [];
+  let open: Extract<Item, { kind: "activity" }> | null = null;
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    if (folded[i]) {
+      if (!open) {
+        open = { kind: "activity", id: row.id, rows: [] };
+        items.push(open);
+      }
+      open.rows.push(row);
+    } else {
+      open = null;
+      items.push({ kind: "row", row });
+    }
+  }
+  return items;
+}
+
+type Tool = Extract<Row, { kind: "tool" }>;
+
+/** The line shown on a collapsed group: "Read a file, ran 10 commands". */
+export function activitySummary(rows: Row[]): string {
+  const order: string[] = [];
+  const count = new Map<string, number>();
+  const paths = new Map<string, Set<string>>();
+  const bump = (cat: string, path?: string) => {
+    if (!count.has(cat)) {
+      order.push(cat);
+      count.set(cat, 0);
+    }
+    if (path) {
+      // Editing the same file five times is one file touched, not five.
+      const seen = paths.get(cat) ?? new Set<string>();
+      if (seen.has(path)) return;
+      seen.add(path);
+      paths.set(cat, seen);
+    }
+    count.set(cat, (count.get(cat) ?? 0) + 1);
+  };
+
+  for (const r of rows) {
+    if (r.kind !== "tool") continue;
+    const path = typeof r.arguments.path === "string" ? r.arguments.path : undefined;
+    switch (r.name) {
+      case "view_file": bump("read", path); break;
+      case "str_replace": bump("edit", path); break;
+      case "create_file": bump("create", path); break;
+      case "execute_bash": bump("bash"); break;
+      case "run_tests":
+      case "run_lint": bump("check"); break;
+      case "preview_rebuild": bump("rebuild"); break;
+      case "preview_status": bump("pstatus"); break;
+      case "update_plan": bump("plan"); break;
+      case "delegate_task": bump("delegate"); break;
+      default: bump(r.name.startsWith("browser_") ? "browser" : "other");
+    }
+  }
+
+  const n = (cat: string) => count.get(cat) ?? 0;
+  const many = (cat: string, one: string, plural: string) => (n(cat) === 1 ? one : plural.replace("#", String(n(cat))));
+  const phrase: Record<string, () => string> = {
+    read: () => many("read", "read a file", "read # files"),
+    edit: () => many("edit", "edited a file", "edited # files"),
+    create: () => many("create", "created a file", "created # files"),
+    bash: () => many("bash", "ran a command", "ran # commands"),
+    check: () => many("check", "ran a check", "ran # checks"),
+    rebuild: () => "rebuilt the preview",
+    pstatus: () => "checked the preview",
+    plan: () => "updated the plan",
+    delegate: () => many("delegate", "delegated a task", "delegated # tasks"),
+    browser: () => many("browser", "used the browser", "used the browser # times"),
+    other: () => many("other", "used a tool", "used # tools"),
+  };
+  const text = order.map((cat) => phrase[cat]()).join(", ");
+  if (!text) return "Agent notes";
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/** How many tool calls in a group ended in failure (shown as a quiet "· 1 failed"). */
+export function failedToolCount(rows: Row[]): number {
+  return rows.filter((r): r is Tool => r.kind === "tool" && r.result !== null && !r.result.ok).length;
+}
+
+/** The newest tool call in a group, as one line — what the agent is doing right now. */
+export function latestToolLine(rows: Row[]): string | null {
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const r = rows[i];
+    if (r.kind === "tool") return toolSummary(r.name, r.arguments);
+  }
+  return null;
+}
+
 /** The approval the person still has to answer, if any: the latest approval row nobody has answered. */
 export function pendingApproval(rows: Row[]): Extract<Row, { kind: "approval" }> | null {
   for (let i = rows.length - 1; i >= 0; i--) {

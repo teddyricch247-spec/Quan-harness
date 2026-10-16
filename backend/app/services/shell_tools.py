@@ -28,6 +28,7 @@ from app.services.guard_rules import (
     format_fatal_eslint_messages,
     mask_secrets,
     referenced_secret_names,
+    secrets_export_prefix,
     truncate_output,
 )
 from app.services.workspace_paths import REPO_ROOT
@@ -123,17 +124,15 @@ async def execute_bash(
 
     referenced = referenced_secret_names(command, list(all_secrets.keys()))
     injected = {name: all_secrets[name] for name in referenced}
-    env = build_bash_env(injected, scratch_home=f"{REPO_ROOT}/.qh-scratch-home")
 
+    # exec_in_workspace has no per-call environment (its exec call is argv-based — see
+    # app/routers/workspace.py's note and workspace_service.py), so the referenced secrets are
+    # exported by a prefix on the script itself. The audit row above recorded the original command,
+    # never this prefixed one, and output is masked below, so the values don't leak into either.
+    script = secrets_export_prefix(injected) + command
     result = await workspace_service.exec_in_workspace(
-        project_id, ["bash", "-c", command], timeout=timeout_seconds, cwd=REPO_ROOT
+        project_id, ["bash", "-c", script], timeout=timeout_seconds, cwd=REPO_ROOT
     )
-    # env is deliberately not threaded through exec_in_workspace's own argv-based
-    # exec call — see app/routers/workspace.py's note on this; passed instead as
-    # inline `export` statements prepended to the command so the underlying Fly
-    # exec call (which has no first-class per-call env parameter in the shape
-    # this client uses, see workspace_service.py) still only ever sees the
-    # minimal env, never a persistent one.
     stdout = mask_secrets(truncate_output(result.stdout), injected)
     stderr = mask_secrets(truncate_output(result.stderr), injected)
 

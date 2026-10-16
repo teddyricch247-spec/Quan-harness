@@ -168,6 +168,28 @@ def build_bash_env(project_secrets: dict[str, str], scratch_home: str) -> dict[s
     return env
 
 
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def secrets_export_prefix(secrets: dict[str, str]) -> str:
+    """The shell text that puts the given project secrets into a command's environment.
+
+    `exec_in_workspace` takes an argv and has no per-call environment, so the secrets a command
+    names have to travel inside the script itself: `export NAME='value'; ` lines in front of it.
+    (Before this existed `build_bash_env`'s result was computed and then dropped, so a command like
+    `curl -H "Authorization: $API_KEY" …` ran with $API_KEY empty.)
+
+    Only the secrets passed in are exported — PATH/HOME/LANG are deliberately left to the
+    workspace's own environment, because replacing PATH there can hide node/npm. Values are
+    single-quoted with shlex, so a value containing quotes, `;` or `$(…)` stays inert data. Names
+    that are not valid shell identifiers are skipped rather than interpolated. A `;` (not a
+    newline) joins the prefix to the command so line numbers in bash's own error messages are
+    unchanged and the command's `||` / `&&` / `;` structure is untouched.
+    """
+    parts = [f"export {name}={shlex.quote(value)}; " for name, value in secrets.items() if _ENV_NAME_RE.match(name)]
+    return "".join(parts)
+
+
 def referenced_secret_names(command: str, secret_names: list[str]) -> list[str]:
     return [name for name in secret_names if f"${name}" in command or "${" + name + "}" in command]
 

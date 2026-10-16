@@ -5,7 +5,10 @@ test_workspace_integration.py); this is the structural half of that guarantee �
 build_bash_env's signature makes it true by construction (see
 app/services/guard_rules.py's docstring), and these tests confirm the
 construction actually holds."""
-from app.services.guard_rules import build_bash_env, mask_secrets, referenced_secret_names, truncate_output
+import subprocess
+from pathlib import Path
+
+from app.services.guard_rules import build_bash_env, mask_secrets, referenced_secret_names, secrets_export_prefix, truncate_output
 
 
 def test_env_contains_only_path_home_lang_by_default():
@@ -86,3 +89,47 @@ def test_truncate_output_respects_char_budget():
 def test_short_output_is_unchanged():
     text = "all good\nexit 0"
     assert truncate_output(text) == text
+
+
+# --- secrets actually reach the command (they were computed and then dropped before) -----------
+
+
+def _run(script: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+
+
+def test_export_prefix_is_empty_without_secrets():
+    assert secrets_export_prefix({}) == ""
+
+
+def test_a_referenced_secret_is_visible_to_the_command():
+    script = secrets_export_prefix({"MY_KEY": "sk_test_123"}) + 'printf %s "$MY_KEY"'
+    assert _run(script).stdout == "sk_test_123"
+
+
+def test_a_hostile_secret_value_stays_data():
+    # Quotes, ;, $(...) and backticks inside the value must not become shell syntax.
+    nasty = "a'b\"c; echo PWNED $(echo INJECTED) `echo TICK` \\ end"
+    result = _run(secrets_export_prefix({"MY_KEY": nasty}) + 'printf %s "$MY_KEY"')
+    assert result.stdout == nasty
+    assert "PWNED\n" not in result.stdout and result.stderr == ""
+
+
+def test_names_that_are_not_shell_identifiers_are_skipped():
+    prefix = secrets_export_prefix({"bad-name": "x", "1BAD": "y", "A B": "z", "OK_1": "fine"})
+    assert prefix == "export OK_1=fine; "  # shlex leaves a plain value unquoted
+
+
+def test_prefix_does_not_change_the_commands_own_control_flow():
+    # `;` joins the prefix, so a command with top-level || / && still behaves as written.
+    result = _run(secrets_export_prefix({"K": "v"}) + "false || echo fallback")
+    assert result.stdout.strip() == "fallback" and result.returncode == 0
+
+
+def test_execute_bash_actually_sends_the_prefixed_script():
+    # Static guard against the original bug coming back: the env was built and never used.
+    src = (Path(__file__).resolve().parents[1] / "app" / "services" / "shell_tools.py").read_text()
+    body = src[src.index("async def execute_bash(") : src.index("# §22 — run_lint / run_tests")]
+    assert "secrets_export_prefix(injected) + command" in body
+    assert '["bash", "-c", script]' in body
+    assert '["bash", "-c", command]' not in body

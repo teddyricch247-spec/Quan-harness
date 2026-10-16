@@ -12,9 +12,22 @@ import {
   uploadAttachment,
 } from "@/lib/attachments";
 import { openSessionStream } from "@/lib/stream";
-import { agentHasStarted, buildRows, describeApproval, lastUserText, pendingApproval, Row, toolSummary } from "@/lib/transcript";
+import {
+  activitySummary,
+  agentHasStarted,
+  buildRows,
+  describeApproval,
+  failedToolCount,
+  groupRows,
+  lastUserText,
+  latestToolLine,
+  pendingApproval,
+  Row,
+  toolSummary,
+} from "@/lib/transcript";
 import type { Project, Session, SessionEvent } from "@/lib/types";
 import { useDraft } from "@/lib/useDraft";
+import ActivityGroup from "./ActivityGroup";
 import AttachmentThumb from "./AttachmentThumb";
 import Composer from "./Composer";
 import { AlertIcon, CloseIcon, Spinner } from "./icons";
@@ -221,6 +234,8 @@ export default function ChatPane({
   }, [sessionId]);
 
   const rows = useMemo(() => buildRows(events), [events]);
+  // The agent's work folds into collapsed "Read a file, ran 10 commands" lines; replies, approvals and errors stay.
+  const items = useMemo(() => groupRows(rows), [rows]);
   const approval = useMemo(() => pendingApproval(rows), [rows]);
   const started = agentHasStarted(events);
   const running = status === "running";
@@ -402,17 +417,38 @@ export default function ChatPane({
           </div>
         )}
 
-        {rows.map((row) => (
-          <TranscriptRow
-            key={row.id}
-            row={row}
-            answering={row.kind === "approval" ? answering[row.approvalId] : undefined}
-            onResolve={resolve}
-            onRetry={retryLast}
-            canRetry={!turnLive}
-            sessionId={sessionId}
-          />
-        ))}
+        {items.map((item, i) => {
+          if (item.kind === "row") {
+            const row = item.row;
+            return (
+              <TranscriptRow
+                key={row.id}
+                row={row}
+                answering={row.kind === "approval" ? answering[row.approvalId] : undefined}
+                onResolve={resolve}
+                onRetry={retryLast}
+                canRetry={!turnLive}
+                sessionId={sessionId}
+              />
+            );
+          }
+          // Only the newest group can still be growing, and not while the agent waits for an answer.
+          const live = running && !approval && i === items.length - 1;
+          return (
+            <ActivityGroup key={`activity-${item.id}`} summary={activitySummary(item.rows)} latest={latestToolLine(item.rows)} live={live} failed={failedToolCount(item.rows)}>
+              {item.rows.map((row) =>
+                row.kind === "agent" ? (
+                  // Narration between tool calls: kept, but quiet.
+                  <div key={row.id} className="text-[13px] text-muted min-w-0">
+                    <Markdown text={row.text} />
+                  </div>
+                ) : (
+                  <TranscriptRow key={row.id} row={row} answering={undefined} onResolve={resolve} onRetry={retryLast} canRetry={false} sessionId={sessionId} />
+                ),
+              )}
+            </ActivityGroup>
+          );
+        })}
 
         {showSetup && <SetupCard project={project} agentStarted={started} onRetrySetup={retrySetup} retrying={retryingSetup} />}
 
@@ -425,7 +461,8 @@ export default function ChatPane({
           </div>
         )}
 
-        {running && !approval && <p className="text-xs text-muted px-1">Working…</p>}
+        {/* A live activity group already shows its own spinner; this covers the gaps (thinking before the first tool, after a reply). */}
+        {running && !approval && items[items.length - 1]?.kind !== "activity" && <p className="text-xs text-muted px-1">Working…</p>}
       </div>
 
       {planSteps.length > 0 && (
