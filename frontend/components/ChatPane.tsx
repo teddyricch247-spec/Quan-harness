@@ -18,6 +18,7 @@ import { useDraft } from "@/lib/useDraft";
 import AttachmentThumb from "./AttachmentThumb";
 import Composer from "./Composer";
 import { AlertIcon, CloseIcon, Spinner } from "./icons";
+import Markdown from "./Markdown";
 import SetupCard from "./SetupCard";
 
 /**
@@ -63,7 +64,12 @@ export interface ChatPaneProps {
   banner?: React.ReactNode;
   /** Gives the page a function that opens the picture picker (null when the pane goes away). */
   registerImagePicker?: (open: (() => void) | null) => void;
+  /** The agent edited a file, rebuilt the preview, or finished a turn: the Preview tab should reload. */
+  onFilesChanged?: () => void;
 }
+
+/** Tools whose success changes what the preview shows. (execute_bash is covered by the end-of-turn signal.) */
+const PREVIEW_AFFECTING_TOOLS = new Set(["str_replace", "create_file", "preview_rebuild"]);
 
 /** A picture waiting in the message box. */
 interface PendingImage {
@@ -92,6 +98,7 @@ export default function ChatPane({
   onOpenSessions,
   banner,
   registerImagePicker,
+  onFilesChanged,
 }: ChatPaneProps) {
   const sessionId = session?.id ?? null;
   const { draft, setDraft, clearDraft, ready } = useDraft(`project:${project.id}`);
@@ -117,6 +124,10 @@ export default function ChatPane({
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activityRef = useRef(onActivity);
   activityRef.current = onActivity;
+  const filesChangedRef = useRef(onFilesChanged);
+  filesChangedRef.current = onFilesChanged;
+  // tool_call event id -> tool name, so a tool_result (which only carries its parent's id) can be attributed.
+  const toolNames = useRef<Map<number, string>>(new Map());
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
 
@@ -157,6 +168,12 @@ export default function ChatPane({
       closeRef.current = openSessionStream(id, lastIdRef.current, {
         onEvent: (ev) => {
           lastIdRef.current = Math.max(lastIdRef.current ?? 0, ev.id);
+          if (ev.event_type === "tool_call") {
+            toolNames.current.set(ev.id, String(ev.content?.name ?? ""));
+          } else if (ev.event_type === "tool_result" && ev.parent_event_id != null) {
+            const name = toolNames.current.get(ev.parent_event_id);
+            if (name && PREVIEW_AFFECTING_TOOLS.has(name) && ev.content?.ok) filesChangedRef.current?.();
+          }
           setEvents((prev) => (prev.some((e) => e.id === ev.id) ? prev : [...prev, ev]));
         },
         onStatus: (st) => {
@@ -164,6 +181,7 @@ export default function ChatPane({
           if (st !== "running") {
             refreshSession(id);
             activityRef.current();
+            filesChangedRef.current?.(); // the turn is over: whatever it changed is on disk now
           }
         },
         onClose: (reason) => {
@@ -181,6 +199,7 @@ export default function ChatPane({
   useEffect(() => {
     disconnect();
     setEvents([]);
+    toolNames.current.clear();
     lastIdRef.current = null;
     setSendError(null);
     setAnswering({});
@@ -507,7 +526,11 @@ function TranscriptRow({
         </div>
       );
     case "agent":
-      return <div className="max-w-[92%] whitespace-pre-wrap break-words">{row.text}</div>;
+      return (
+        <div className="max-w-full min-w-0">
+          <Markdown text={row.text} />
+        </div>
+      );
     case "tool":
       return (
         <details className="border border-line bg-white rounded-xl text-sm">

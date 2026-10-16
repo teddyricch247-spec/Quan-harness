@@ -41,6 +41,9 @@ ENTER_PATH = "/__qh/enter"
 
 _SUBDOMAIN_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,40}[a-z0-9])?$")
 
+# Upstream caching headers the proxy replaces with `Cache-Control: no-store` (see sanitize_response_headers).
+CACHE_HEADERS = frozenset({"cache-control", "etag", "last-modified", "expires", "age", "pragma"})
+
 HOP_BY_HOP = frozenset(
     {
         "connection",
@@ -318,6 +321,11 @@ def sanitize_response_headers(
             continue
         if lname == "x-frame-options":
             continue
+        if lname in CACHE_HEADERS:
+            # The preview exists to show the CURRENT files. A plain static server (python -m http.server, serve)
+            # sends Last-Modified with no Cache-Control, and browsers then cache heuristically, so the iframe kept
+            # showing an old page while the preview address itself already served the new one. Replaced below.
+            continue
         if lname == "content-security-policy":
             value = strip_frame_ancestors(value)
             if not value:
@@ -333,6 +341,7 @@ def sanitize_response_headers(
     sources = " ".join(frame_ancestors) if frame_ancestors else "'none'"
     out.append(("Content-Security-Policy", f"frame-ancestors {sources}"))
     out.append(("X-Robots-Tag", "noindex, nofollow"))
+    out.append(("Cache-Control", "no-store"))
     return out
 
 

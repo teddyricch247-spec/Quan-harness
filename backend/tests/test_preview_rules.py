@@ -216,3 +216,11 @@ def test_backoff_is_bounded_by_the_total_budget():
 def test_error_page_escapes_html():
     page = r.error_page_html("<b>x</b>", "a & <script>", refresh_seconds=3)
     assert "<script>" not in page and "&lt;script&gt;" in page and 'http-equiv="refresh" content="3"' in page
+
+
+def test_upstream_caching_headers_are_replaced_with_no_store_so_the_iframe_never_shows_an_old_page():
+    out = _sanitize([("Last-Modified", "Wed, 01 Jan 2025 00:00:00 GMT"), ("ETag", '"abc"'), ("Cache-Control", "max-age=31536000"), ("Expires", "x"), ("Content-Type", "text/html")])
+    names = [n.lower() for n, _ in out]
+    assert "last-modified" not in names and "etag" not in names and "expires" not in names
+    assert [v for n, v in out if n.lower() == "cache-control"] == ["no-store"]
+    assert ("Content-Type", "text/html") in out

@@ -28,7 +28,16 @@ const BILLING_LABEL: Record<NonNullable<PreviewStatus["billing_state"]>, { text:
   cold: { text: "Asleep", dot: "bg-neutral-400", hint: "The workspace is asleep and not billed. It wakes on the next request." },
 };
 
-export default function PreviewPanel({ project }: { project: Project }) {
+// After the agent changes files, wait this long (and coalesce further changes) before reloading the frame.
+const AUTO_REFRESH_DEBOUNCE_MS = 1200;
+
+/**
+ * `refreshSignal` is a counter the workspace bumps when the agent changed files, finished a turn, or a
+ * deploy finished. While the frame is open each bump reloads it. Before this existed the frame was
+ * only ever loaded by the Open / Reload buttons, so it kept showing the page as it was when it was
+ * opened while the preview address itself already served the newer files.
+ */
+export default function PreviewPanel({ project, refreshSignal = 0 }: { project: Project; refreshSignal?: number }) {
   const [status, setStatus] = useState<PreviewStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [iframeUrl, setIframeUrl] = useState<string | null>(null);
@@ -37,11 +46,14 @@ export default function PreviewPanel({ project }: { project: Project }) {
   const [restarting, setRestarting] = useState(false);
   const [restartNote, setRestartNote] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [refreshedAt, setRefreshedAt] = useState<Date | null>(null);
   const hiddenTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // The idle timer fires long after the render that created it, so it reads the
   // current URL through a ref rather than a stale closure.
   const iframeUrlRef = useRef<string | null>(null);
   iframeUrlRef.current = iframeUrl;
+  const openPreviewRef = useRef<() => Promise<void>>(async () => {});
+  const lastSignal = useRef(refreshSignal);
 
   const loadStatus = useCallback(() => {
     apiFetch<PreviewStatus>(`/projects/${project.id}/preview`)
@@ -92,6 +104,7 @@ export default function PreviewPanel({ project }: { project: Project }) {
       // and "resume" mint a new one rather than reusing an old one.
       const session = await apiFetch<PreviewSession>(`/projects/${project.id}/preview/session`, { method: "POST" });
       setIframeUrl(session.url);
+      setRefreshedAt(new Date());
       loadStatus();
     } catch (e) {
       setError((e as ApiError).message);
@@ -99,6 +112,16 @@ export default function PreviewPanel({ project }: { project: Project }) {
       setOpening(false);
     }
   }
+
+  openPreviewRef.current = openPreview;
+
+  useEffect(() => {
+    if (refreshSignal === lastSignal.current) return;
+    lastSignal.current = refreshSignal;
+    if (!iframeUrlRef.current) return; // not open: the next Open mints a fresh session anyway
+    const timer = setTimeout(() => void openPreviewRef.current(), AUTO_REFRESH_DEBOUNCE_MS);
+    return () => clearTimeout(timer); // a newer change replaces this timer, so a burst is one reload
+  }, [refreshSignal]);
 
   async function restart() {
     setRestarting(true);
@@ -204,6 +227,7 @@ export default function PreviewPanel({ project }: { project: Project }) {
                 {copied ? "Copied" : "Copy"}
               </button>
               {status.entry_target && <span> · showing “{status.entry_target}”</span>}
+              {iframeUrl && refreshedAt && <span> · loaded {refreshedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</span>}
             </div>
           )}
         </>

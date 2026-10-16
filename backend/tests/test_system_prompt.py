@@ -163,3 +163,19 @@ def test_dynamic_section_order_matches_18s_own_list():
     ]
     positions = [text.index(tag) for tag in order]
     assert positions == sorted(positions)
+
+
+def test_communication_style_defines_a_terse_structured_output_contract():
+    s = sp.STATIC_COMMUNICATION_STYLE
+    for needle in ("Result:", "Changes:", "Verified:", "Open:", "table", "Never write"):
+        assert needle in s
+    assert "—" not in s  # the style block must follow its own no-em-dash rule
+
+
+def test_static_prompt_does_not_promise_a_browser_the_session_may_not_have():
+    # Browser tools are per-session (server switch + Chromium + a vision model). A static claim contradicted by the
+    # dynamic VISUAL_QA_AVAILABILITY section made the model say "I have no browser" with no explanation.
+    assert "headless browser" not in sp.assemble_static()
+    assert "browser_* tools" in sp.STATIC_VISUAL_VERIFICATION
+    text = sp.assemble(_minimal_dynamic(visual_qa="You have no browser tools this session (reason)."))
+    assert "<VISUAL_QA_AVAILABILITY>" in text

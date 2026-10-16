@@ -58,6 +58,16 @@ function Workspace({ id }: { id: string }) {
   const [session, setSession] = useState<Session | null>(null);
   const [sessionsLoaded, setSessionsLoaded] = useState(false);
   const [tab, setTab] = useState<"chat" | "preview">("chat");
+  // Counter the Preview tab watches: bumped when the agent changed files, a turn ended, or a deploy finished.
+  const [previewTick, setPreviewTick] = useState(0);
+  const bumpPreview = useCallback(() => setPreviewTick((t) => t + 1), []);
+  const latestRun = deploy.runs[0] ?? null;
+  const prevRunState = useRef<string | null>(null);
+  useEffect(() => {
+    const state = latestRun ? `${latestRun.id}:${latestRun.status}` : null;
+    if (prevRunState.current?.endsWith(":running") && state && state.endsWith(":success")) bumpPreview();
+    prevRunState.current = state;
+  }, [latestRun, bumpPreview]);
 
   // Read once from sessionStorage (see lib/handoff.ts). A ref, so React Strict Mode's second effect
   // run in development sees the same value instead of an already-emptied store.
@@ -220,6 +230,7 @@ function Workspace({ id }: { id: string }) {
               onModel={() => sheet.open("model")}
               onOpenSessions={() => sheet.open("sessions")}
               registerImagePicker={registerImagePicker}
+              onFilesChanged={bumpPreview}
               banner={importBanner}
             />
           ) : (
@@ -234,6 +245,7 @@ function Workspace({ id }: { id: string }) {
             runsLoaded={deploy.loaded}
             onDeploy={() => sheet.open("deploy")}
             onOpenSecrets={() => sheet.open("secrets")}
+            refreshSignal={previewTick}
           />
         </section>
       </div>

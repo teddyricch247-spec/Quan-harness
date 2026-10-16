@@ -17,12 +17,15 @@ export default function PreviewTab({
   runsLoaded,
   onDeploy,
   onOpenSecrets,
+  refreshSignal,
 }: {
   project: Project;
   runs: DeployRun[];
   runsLoaded: boolean;
   onDeploy: () => void;
   onOpenSecrets: () => void;
+  /** Bumped when the agent changed files or a deploy finished; reloads an open preview. */
+  refreshSignal?: number;
 }) {
   const latest = runs[0] ?? null;
 
@@ -58,7 +61,7 @@ export default function PreviewTab({
           {latest.status === "failed" ? "View details" : "Deploy"}
         </button>
       </div>
-      <PreviewPanel project={project} />
+      <PreviewPanel project={project} refreshSignal={refreshSignal} />
       <PreviewNotices project={project} onOpenSecrets={onOpenSecrets} />
     </div>
   );
