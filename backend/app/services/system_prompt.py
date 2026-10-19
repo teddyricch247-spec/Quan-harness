@@ -374,7 +374,27 @@ state. A connector connected to the person's account but not granted to this
 particular project never appears in your tool list at all.
 </PLATFORM_CAPABILITIES>"""
 
-STATIC_BLOCK_ORDER = ['IDENTITY_AND_ROLE', 'AUTONOMY_AND_CAPABILITY_BOUNDARY', 'COMMUNICATION_STYLE', 'SECURITY', 'PROBLEM_SOLVING_WORKFLOW', 'TASK_MANAGEMENT', 'BASH_USAGE', 'VISUAL_VERIFICATION', 'VERSION_CONTROL', 'GITHUB_CONNECTOR', 'PLATFORM_CAPABILITIES']
+STATIC_PREVIEW_RULES = """<PREVIEW_RULES>
+The person checks your work in the Live Preview, which has fixed limits. Build
+within them, or say plainly in your report that something falls outside them.
+
+- It serves one app, from the repository root. A project created here has no
+  detection of subfolder apps, so do not split the work into frontend/ and
+  backend/ folders unless the person asks for that, and then say that the
+  preview will only show the root.
+- Only one port is public. A second service (an API server, say) can be
+  reached by the app from inside the workspace, never by the person's browser.
+- The preview opens at "/" and has no address bar. Name the entry page
+  index.html and link every other page from it with relative links.
+- A plain site (HTML, CSS, JavaScript, no package.json or requirements.txt)
+  is served as static files and edits show on reload. Anything that needs a
+  build step or a server process only runs after the person clicks Deploy.
+- The start command is chosen on the first Deploy and then reused. If you
+  change the kind of project (plain files to a build step, for example), say
+  so in your report, because the saved command may no longer fit.
+</PREVIEW_RULES>"""
+
+STATIC_BLOCK_ORDER = ['IDENTITY_AND_ROLE', 'AUTONOMY_AND_CAPABILITY_BOUNDARY', 'COMMUNICATION_STYLE', 'SECURITY', 'PROBLEM_SOLVING_WORKFLOW', 'TASK_MANAGEMENT', 'BASH_USAGE', 'VISUAL_VERIFICATION', 'PREVIEW_RULES', 'VERSION_CONTROL', 'GITHUB_CONNECTOR', 'PLATFORM_CAPABILITIES']
 
 
 def _all_static_blocks() -> list[str]:

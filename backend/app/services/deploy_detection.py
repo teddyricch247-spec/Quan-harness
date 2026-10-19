@@ -63,6 +63,8 @@ _ROOT_MARKER_FILES = ("package.json", "requirements.txt", "Dockerfile")
 _DEFAULT_NEXT_PORT = 3000
 _DEFAULT_NODE_PORT = 3000
 _DEFAULT_PYTHON_PORT = 8000
+_DEFAULT_STATIC_PORT = 8000
+_STATIC_RUN_CMD = "python3 -m http.server $PORT"
 
 _PROCFILE_WEB_RE = re.compile(r"^web:\s*(.+)$", re.MULTILINE)
 _PACKAGE_JSON_SCRIPT_RE = re.compile(r'"scripts"\s*:\s*\{([^}]*)\}', re.DOTALL)
@@ -121,7 +123,24 @@ def detect_stack_from_rules(scan: dict) -> StackDetectionResult | None:
         if result is not None:
             return result
 
+    if _is_plain_static_site(scan):
+        # `stack="python"` on purpose: the deploy_runs_stack_check constraint only allows nextjs/node/python/
+        # dockerfile/llm_fallback, and a new value there needs a migration. The command is a stock Python file server.
+        return StackDetectionResult(stack="python", build_cmd=None, run_cmd=_STATIC_RUN_CMD, port=_DEFAULT_STATIC_PORT)
+
     return None
+
+
+def _is_plain_static_site(scan: dict) -> bool:
+    """An index.html at the root and nothing that says "this needs a build or a server": no package.json (a Vite
+    project also has an index.html at its root, and serving that raw is wrong), no requirements.txt/Procfile/
+    manage.py/app.py/main.py. Anything else is left to the other rules or the model fallback. Before this rule a
+    from-scratch static page depended on the fallback model happening to answer with a file server."""
+    if "index.html" not in (scan.get("top_level_files") or []):
+        return False
+    if scan.get("package_json") is not None:
+        return False
+    return not any(scan.get(key) for key in ("requirements_txt", "procfile", "manage_py", "app_py", "main_py"))
 
 
 def _npm_scripts(package_json_text: str) -> dict[str, str]:

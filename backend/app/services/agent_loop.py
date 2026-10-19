@@ -605,7 +605,10 @@ async def _execute_native(
 
 
 def _as_range(value) -> tuple[int, int] | None:
-    if not value or len(value) != 2:
+    # `view_range` comes straight from the model's JSON tool call, and some models send a bare number or a
+    # string instead of [start, end]. `len(50)` raised "object of type 'int' has no len()" out of the turn
+    # loop. Anything that isn't a two-item list/tuple simply means "no range": the whole file is returned.
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
         return None
     try:
         return int(value[0]), int(value[1])
@@ -1059,13 +1062,20 @@ async def _execute_call(
     call for why it has to happen inside execute_bash rather than at a
     caller like this one.
 
-    If the underlying call raises, no row is written (the exception
-    propagates to the turn loop, which records the failure as its own
-    transcript event) — same behavior as before this labelling change; it was
-    deliberately not widened here."""
-    outcome = await _execute_call_inner(
-        project_id, session_id, user_id, name, arguments, viewed_paths, merged_mcp, session, conversation_snapshot
-    )
+    A tool that raises is turned into a failed result (and audited as a
+    failure) below, so one bad call can't crash the turn or leave a dangling
+    tool_call in the log that crash recovery would re-run, and re-crash on, at
+    the start of every later message."""
+    try:
+        outcome = await _execute_call_inner(
+            project_id, session_id, user_id, name, arguments, viewed_paths, merged_mcp, session, conversation_snapshot
+        )
+    except Exception as exc:  # noqa: BLE001 — a tool that blows up is a failed RESULT the model can see, not a crashed turn
+        # Without this the exception escaped to _run, which marked the session failed while the tool_call event
+        # stayed dangling in the log. Crash recovery then re-ran that call at the start of EVERY later message,
+        # hit the same exception, and the session could never take another turn.
+        logger.exception("tool call %s failed for project %s", name, project_id)
+        outcome = ExecutionOutcome(ok=False, error=f"{name} failed: {' '.join(str(exc).split())[:300] or type(exc).__name__}")
     # §23.10 / Phase 5.4: preview secrets are "never in the LLM's context." This is
     # the one place every tool result passes through on its way to the transcript
     # and the model, so it's the one place that guarantees it: whatever a tool
