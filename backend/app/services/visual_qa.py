@@ -3,12 +3,19 @@
 
 Three things here:
 
-  1. "Does this credential's model read images?" (`credential_supports_vision`) — one answer, used by the browser tools
-     AND by Phase 6's picture attachments. Fails closed.
+  1. "Does this credential's model read images?" (`credential_supports_vision`) — one answer, used by the browser's
+     screenshots AND by Phase 6's picture attachments. Fails closed.
   2. `preview_status` / `preview_rebuild` — whether the live preview is up and matches the files, and a request for the
      same deterministic pipeline the Deploy button runs (deploy_pipeline.start_deploy). No credentials of its own, no push.
   3. The browser itself: Playwright's headless Chromium, in this backend process, pointed at the project's own Sprite
      URL (preview_runtime.get_upstream_origin) — NEVER at the public preview proxy built for people.
+
+Text-only models
+----------------
+A model that isn't confirmed to read images still gets the browser. Navigate, click, type and console logs never needed
+vision; only the screenshot did. For such a model `browser_screenshot` returns a TEXT outline of the page instead of a
+picture (visual_qa_text.py): the visible text plus every clickable/typeable element with a selector. The vision check
+therefore no longer switches the browser off (see `availability_for`); it only decides what `browser_screenshot` returns.
 
 Security shape of the browser — read before changing anything
 -------------------------------------------------------------
@@ -24,10 +31,13 @@ token to the Sprite it is looking at. So:
     wall stops the hop anyway; two layers, neither of which should be the only one.
   * A tool parameter is never a URL or a credential: `browser_navigate` takes a path (normalize_path).
   * Service workers are blocked, downloads are refused, no permissions are granted, certificate errors are not ignored.
+  * The text outline is read-only DOM inspection of the same page the screenshot would have shown; it opens no new network
+    path and is bounded and cleaned before the model sees it.
 
 Nothing here has run against a real Sprite or a real Chromium: this environment has neither. docs/PHASE5_6_5_7_5_8_NOTES.md
 lists what that leaves unverified; the one question that matters most — whether a Sprite's edge forwards `Authorization`
-to the app inside it — can only be answered by deploying a page that echoes its request headers.
+to the app inside it — can only be answered by deploying a page that echoes its request headers
+(docs/BROWSER_SETUP.md has the steps).
 """
 from __future__ import annotations
 
@@ -36,12 +46,12 @@ import base64
 import importlib.util
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from urllib.parse import urlsplit
 
 from app.config import get_settings
 from app.repositories import deploy_runs as deploy_runs_repo
-from app.services import deploy_pipeline, llm_client, preview_runtime, workspace_fingerprint
+from app.services import deploy_pipeline, llm_client, preview_runtime, visual_qa_text, workspace_fingerprint
 from app.services import visual_qa_rules as rules
 
 logger = logging.getLogger(__name__)
@@ -95,15 +105,19 @@ _runtime_blocked_until = 0.0
 _runtime_last_error = ""
 
 
+def _playwright_installed() -> bool:
+    try:
+        return importlib.util.find_spec("playwright.async_api") is not None
+    except (ImportError, ValueError):
+        return False
+
+
 def runtime_available() -> bool:
     """Playwright importable, and Chromium hasn't failed to start in the last few minutes (the feature switches itself off
     for a while rather than failing every tool call and every turn)."""
     if time.monotonic() < _runtime_blocked_until:
         return False
-    try:
-        return importlib.util.find_spec("playwright.async_api") is not None
-    except (ImportError, ValueError):
-        return False
+    return _playwright_installed()
 
 
 def _mark_runtime_failure(exc: Exception) -> None:
@@ -114,12 +128,33 @@ def _mark_runtime_failure(exc: Exception) -> None:
 
 
 def availability_for(credential: llm_client.ResolvedCredential) -> rules.BrowserAvailability:
-    return rules.decide_browser_availability(
+    """May the browser tools be offered for this credential right now?
+
+    The vision check is deliberately NOT passed to the decision (`vision_confirmed=True`): a model that can't read images
+    still gets navigate/click/type/console, and its `browser_screenshot` returns a text outline instead (see the module
+    docstring). `credential_supports_vision` is consulted later, per screenshot, in `_run_browser_tool`.
+
+    Playwright simply not being installed (a dev machine, a lean deploy) is not an alarm: the model is told it has no
+    browser, but the person isn't shown an error on every session. A Chromium that is installed but failed to start is
+    still shown."""
+    result = rules.decide_browser_availability(
         server_enabled=get_settings().agent_browser_enabled,
         runtime_available=runtime_available(),
-        vision_confirmed=credential_supports_vision(credential),
+        vision_confirmed=True,
         model_label=model_string(credential),
     )
+    if result.code == "runtime_missing" and not _playwright_installed():
+        result = replace(result, surface_error=False)
+    return result
+
+
+async def _model_reads_images(project: dict) -> bool:
+    """Whether the project's CURRENT credential is confirmed to read images (decides screenshot vs text outline)."""
+    try:
+        credential = await llm_client.resolve_credential(project)
+    except Exception:  # noqa: BLE001 — no credential / vault hiccup: the safe answer is "no pictures"
+        return False
+    return credential_supports_vision(credential)
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +221,7 @@ async def run_preview_rebuild(project: dict, user_id: str) -> QaResult:
 # ---------------------------------------------------------------------------
 
 VIEWPORT = {"width": 1280, "height": 800}
-MAX_LIVE_PAGES = 3  # each is hundreds of MB of Chromium; the least recently used is closed to make room
+MAX_LIVE_PAGES = 3  # the old fixed ceiling, kept for anything that imports it; the live one is AGENT_BROWSER_MAX_PAGES
 IDLE_CLOSE_SECONDS = 600.0
 TOOL_TIMEOUT_SECONDS = 45.0
 NAVIGATION_TIMEOUT_MS = 20_000
@@ -196,6 +231,12 @@ CONSOLE_BUFFER_MAX = 200
 _playwright = None
 _browser = None
 _start_lock = asyncio.Lock()
+
+
+def _max_live_pages() -> int:
+    """How many pages stay open at once (AGENT_BROWSER_MAX_PAGES); the least recently used is closed to make room. Each
+    live page costs Chromium memory, so a small instance should keep this at 1 or 2."""
+    return max(1, int(get_settings().agent_browser_max_pages))
 
 
 @dataclass
@@ -274,7 +315,7 @@ async def _reap(keep: str) -> None:
     for sid, live in list(_pages.items()):
         if sid != keep and now - live.last_used > IDLE_CLOSE_SECONDS:
             await _close_live(sid)
-    while len(_pages) >= MAX_LIVE_PAGES:
+    while len(_pages) >= _max_live_pages():
         oldest = min((sid for sid in _pages if sid != keep), key=lambda sid: _pages[sid].last_used, default=None)
         if oldest is None:
             break
@@ -369,6 +410,18 @@ async def run_browser_tool(session_id: str, project: dict, name: str, arguments:
         return QaResult(False, error=f"{name} failed: {_short_error(exc)}")
 
 
+async def _text_outline(page) -> QaResult:
+    """`browser_screenshot` for a model that can't read images: the page as text (visible text + clickable elements)."""
+    data = await page.evaluate(visual_qa_text.OUTLINE_JS)
+    if not isinstance(data, dict):
+        data = {}
+    title = " ".join((await page.title()).split())[:200]
+    return QaResult(
+        True,
+        visual_qa_text.format_text_outline(_path_of(page.url), title, data.get("text"), data.get("elements")),
+    )
+
+
 async def _run_browser_tool(session_id: str, project: dict, name: str, arguments: dict) -> QaResult:
     # Validate parameters BEFORE touching the browser: a bad call costs nothing and never starts Chromium.
     if name == "browser_navigate":
@@ -426,6 +479,8 @@ async def _run_browser_tool(session_id: str, project: dict, name: str, arguments
         # browser_screenshot
         if page.url in ("", "about:blank"):
             return QaResult(False, error="The browser hasn't opened a page yet. Call browser_navigate first.")
+        if not await _model_reads_images(project):
+            return await _text_outline(page)  # no picture for a model that can't read one: the page as text instead
         png = await page.screenshot(type="png", full_page=False, timeout=10_000)
         mime, raw = "image/png", png
         if len(raw) > rules.MAX_SCREENSHOT_BYTES:

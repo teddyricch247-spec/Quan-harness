@@ -1,7 +1,7 @@
 "use client";
 
 import { apiUrl, authHeaders } from "./api";
-import { dispatchFrame } from "./sse";
+import { dispatchFrame, type LiveDelta } from "./sse";
 import type { SessionEvent } from "./types";
 
 /**
@@ -17,10 +17,16 @@ import type { SessionEvent } from "./types";
  * itself on a terminal status (completed / failed / stuck / waiting_approval); `onClose` fires then,
  * and the caller reconnects with the last event id it saw to watch a later turn — the same path a
  * dropped connection uses.
+ *
+ * While the agent is working the server also sends `delta` frames (the reply so far, piece by piece), `thinking` frames
+ * (its thinking so far) and `reset` (drop both); they are optional here — see lib/sse.ts.
  */
 export interface SessionStreamHandlers {
   onEvent: (event: SessionEvent) => void;
   onStatus: (status: string) => void;
+  onDelta?: (delta: LiveDelta) => void;
+  onThinking?: (delta: LiveDelta) => void;
+  onReset?: () => void;
   onClose: (reason: "ended" | "aborted" | "error", error?: Error) => void;
 }
 

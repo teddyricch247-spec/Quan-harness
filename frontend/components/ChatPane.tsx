@@ -55,8 +55,13 @@ import SetupCard from "./SetupCard";
  * in the message box; on send it is uploaded to the session — created first if this is the project's first
  * message — and the message goes with the uploaded ids. Up to four per message.
  *
- * Not offered, because the backend has no endpoint for it: a Stop button (the loop can be steered
- * mid-run with /interrupt — which is what sending while running does — but not cancelled).
+ * Live reply and thinking: while the agent works, the server sends its reply (`delta`) and its thinking (`thinking`) so
+ * far, piece by piece. They are shown at the end of the transcript, gathered in refs and drawn at most once per animation
+ * frame, and swapped for the real events the moment those arrive (or dropped on a `reset`, a status change, or a closed
+ * stream — a reconnect re-sends what was shown so far). The saved thinking is a collapsed "Thinking" row.
+ *
+ * Stop: while a turn is running, a Stop button asks the backend to cancel it (POST /sessions/{id}/stop). The loop can
+ * still be steered mid-run with /interrupt — which is what sending while running does.
  */
 export interface ChatPaneProps {
   project: Project;
@@ -125,6 +130,15 @@ export default function ChatPane({
   const [sendError, setSendError] = useState<string | null>(null);
   const [answering, setAnswering] = useState<Record<string, "allow" | "deny">>({});
   const [retryingSetup, setRetryingSetup] = useState(false);
+  // The reply being written right now, before its message event exists. Pieces are gathered in a ref and shown at most
+  // once per animation frame, so a fast stream doesn't re-render the whole pane per token. The same for the thinking.
+  const [liveText, setLiveText] = useState("");
+  const liveRef = useRef("");
+  const liveFrame = useRef<number | null>(null);
+  const [liveThinking, setLiveThinking] = useState("");
+  const thinkingRef = useRef("");
+  const thinkingFrame = useRef<number | null>(null);
+  const [stopping, setStopping] = useState(false);
   const [pending, setPending] = useState<PendingImage[]>([]);
   const pendingRef = useRef<PendingImage[]>([]);
   pendingRef.current = pending;
@@ -164,6 +178,53 @@ export default function ChatPane({
     reconnectTimer.current = null;
   }, []);
 
+  const clearThinking = useCallback(() => {
+    thinkingRef.current = "";
+    if (thinkingFrame.current != null) {
+      cancelAnimationFrame(thinkingFrame.current);
+      thinkingFrame.current = null;
+    }
+    setLiveThinking("");
+  }, []);
+
+  const clearLive = useCallback(() => {
+    liveRef.current = "";
+    if (liveFrame.current != null) {
+      cancelAnimationFrame(liveFrame.current);
+      liveFrame.current = null;
+    }
+    setLiveText("");
+    clearThinking();
+  }, [clearThinking]);
+
+  const pushLive = useCallback((text: string, replace: boolean) => {
+    liveRef.current = replace ? text : liveRef.current + text;
+    if (liveFrame.current == null) {
+      liveFrame.current = requestAnimationFrame(() => {
+        liveFrame.current = null;
+        setLiveText(liveRef.current);
+      });
+    }
+  }, []);
+
+  const pushThinking = useCallback((text: string, replace: boolean) => {
+    thinkingRef.current = replace ? text : thinkingRef.current + text;
+    if (thinkingFrame.current == null) {
+      thinkingFrame.current = requestAnimationFrame(() => {
+        thinkingFrame.current = null;
+        setLiveThinking(thinkingRef.current);
+      });
+    }
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (liveFrame.current != null) cancelAnimationFrame(liveFrame.current);
+      if (thinkingFrame.current != null) cancelAnimationFrame(thinkingFrame.current);
+    },
+    []
+  );
+
   const refreshSession = useCallback((id: string) => {
     apiFetch<Session>(`/sessions/${id}`)
       .then((s) => {
@@ -181,6 +242,12 @@ export default function ChatPane({
       closeRef.current = openSessionStream(id, lastIdRef.current, {
         onEvent: (ev) => {
           lastIdRef.current = Math.max(lastIdRef.current ?? 0, ev.id);
+          if (ev.role === "agent") {
+            // The saved thinking replaces the live thinking (the live reply stays until its own message arrives);
+            // any other agent event — the finished reply, the next step — replaces everything live.
+            if (ev.event_type === "thinking") clearThinking();
+            else clearLive();
+          }
           if (ev.event_type === "tool_call") {
             toolNames.current.set(ev.id, String(ev.content?.name ?? ""));
           } else if (ev.event_type === "tool_result" && ev.parent_event_id != null) {
@@ -189,7 +256,11 @@ export default function ChatPane({
           }
           setEvents((prev) => (prev.some((e) => e.id === ev.id) ? prev : [...prev, ev]));
         },
+        onDelta: (d) => pushLive(d.text, d.replace),
+        onThinking: (d) => pushThinking(d.text, d.replace),
+        onReset: () => clearLive(),
         onStatus: (st) => {
+          clearLive();
           setStatus(st as Status);
           if (st !== "running") {
             refreshSession(id);
@@ -198,6 +269,9 @@ export default function ChatPane({
           }
         },
         onClose: (reason) => {
+          // Not on "aborted": that is this pane replacing the connection itself, and the NEW stream may already be
+          // delivering text. On "ended"/"error" what was shown is stale; a reconnect re-sends what was shown so far.
+          if (reason !== "aborted") clearLive();
           // A dropped connection mid-turn: pick the stream back up from the last event seen.
           if (reason === "error" && statusRef.current === "running") {
             reconnectTimer.current = setTimeout(() => connect(id), 3000);
@@ -205,12 +279,13 @@ export default function ChatPane({
         },
       });
     },
-    [disconnect, refreshSession]
+    [disconnect, refreshSession, clearLive, clearThinking, pushLive, pushThinking]
   );
 
   // Switching session (or arriving at one): start clean, read its state, open its stream.
   useEffect(() => {
     disconnect();
+    clearLive();
     setEvents([]);
     toolNames.current.clear();
     lastIdRef.current = null;
@@ -246,7 +321,7 @@ export default function ChatPane({
   useEffect(() => {
     const el = scrollRef.current;
     if (el && stickToBottom.current) el.scrollTop = el.scrollHeight;
-  }, [rows.length, status, approval?.id]);
+  }, [rows.length, status, approval?.id, liveText.length, liveThinking.length]);
 
   function onScroll() {
     const el = scrollRef.current;
@@ -375,6 +450,22 @@ export default function ChatPane({
     }
   }
 
+  async function stop() {
+    if (!sessionId || stopping) return;
+    setStopping(true);
+    setSendError(null);
+    try {
+      await apiFetch(`/sessions/${sessionId}/stop`, { method: "POST" });
+    } catch (e) {
+      // 409 = nothing was running any more (the turn ended a moment before the click): not an error worth showing.
+      if ((e as ApiError).status !== 409) setSendError((e as ApiError).message);
+    } finally {
+      refreshSession(sessionId);
+      activityRef.current();
+      setStopping(false);
+    }
+  }
+
   async function retrySetup() {
     setRetryingSetup(true);
     try {
@@ -450,6 +541,22 @@ export default function ChatPane({
           );
         })}
 
+        {liveThinking && (
+          // What the model is thinking, as it thinks. Kept small and muted; the saved version is a collapsed row.
+          <div className="text-[13px] text-muted min-w-0" aria-live="off">
+            <p className="text-xs mb-0.5">Thinking…</p>
+            <div className="whitespace-pre-wrap break-words max-h-40 overflow-y-auto">{liveThinking}</div>
+          </div>
+        )}
+
+        {liveText && (
+          // The reply as it is being written. aria-live is off here on purpose: announcing every piece would be noise;
+          // the finished message is announced when it replaces this.
+          <div className="max-w-full min-w-0" aria-live="off">
+            <Markdown text={liveText} />
+          </div>
+        )}
+
         {showSetup && <SetupCard project={project} agentStarted={started} onRetrySetup={retrySetup} retrying={retryingSetup} />}
 
         {failedFirstPrompt && (
@@ -462,7 +569,7 @@ export default function ChatPane({
         )}
 
         {/* A live activity group already shows its own spinner; this covers the gaps (thinking before the first tool, after a reply). */}
-        {running && !approval && items[items.length - 1]?.kind !== "activity" && <p className="text-xs text-muted px-1">Working…</p>}
+        {running && !approval && !liveText && !liveThinking && items[items.length - 1]?.kind !== "activity" && <p className="text-xs text-muted px-1">Working…</p>}
       </div>
 
       {planSteps.length > 0 && (
@@ -484,6 +591,14 @@ export default function ChatPane({
         <p className="mx-3 desk:mx-4 mb-2 text-sm text-accent flex-none" role="alert">
           {sendError}
         </p>
+      )}
+
+      {running && !readOnly && sessionId && (
+        <div className="mx-3 desk:mx-4 mb-2 flex justify-center flex-none">
+          <button type="button" className="btn-default" onClick={stop} disabled={stopping}>
+            {stopping ? "Stopping…" : "Stop"}
+          </button>
+        </div>
       )}
 
       <input
@@ -567,6 +682,13 @@ function TranscriptRow({
         <div className="max-w-full min-w-0">
           <Markdown text={row.text} />
         </div>
+      );
+    case "thinking":
+      return (
+        <details className="text-[13px] text-muted min-w-0">
+          <summary className="cursor-pointer select-none">Thinking</summary>
+          <div className="mt-1 whitespace-pre-wrap break-words">{row.text}</div>
+        </details>
       );
     case "tool":
       return (

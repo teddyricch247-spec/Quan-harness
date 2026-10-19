@@ -37,7 +37,7 @@ from app.repositories import approval_requests as approval_requests_repo
 from app.repositories import session_attachments as session_attachments_repo
 from app.repositories import session_events as session_events_repo
 from app.repositories import sessions as sessions_repo
-from app.services import agent_loop, image_input
+from app.services import agent_loop, image_input, live_text, turn_control
 
 router = APIRouter(tags=["agent"])
 
@@ -149,7 +149,8 @@ async def send_message(session_id: str, body: MessageCreate, user: AuthedUser = 
         raise HTTPException(status_code=422, detail="Message text cannot be empty.")
     await _check_attachments_usable(user.user_id, session_id, body.attachment_ids)
     try:
-        started = await agent_loop.start_turn(session_id, user.user_id, body.text, body.attachment_ids or None)
+        with live_text.streaming_for(session_id):  # the turn started here streams its reply to anyone watching
+            started = await agent_loop.start_turn(session_id, user.user_id, body.text, body.attachment_ids or None)
     except agent_loop.AttachmentsUnavailable as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     if not started:
@@ -168,7 +169,8 @@ async def interrupt_session(session_id: str, body: InterruptCreate, user: Authed
         raise HTTPException(status_code=422, detail="Interrupt text cannot be empty.")
     await _check_attachments_usable(user.user_id, session_id, body.attachment_ids)
     try:
-        ok = await agent_loop.send_interrupt(session_id, user.user_id, body.text, body.attachment_ids or None)
+        with live_text.streaming_for(session_id):  # only matters if this starts a turn; a running one keeps its own binding
+            ok = await agent_loop.send_interrupt(session_id, user.user_id, body.text, body.attachment_ids or None)
     except agent_loop.AttachmentsUnavailable as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     if not ok:
@@ -177,6 +179,20 @@ async def interrupt_session(session_id: str, body: InterruptCreate, user: Authed
             raise HTTPException(status_code=404, detail="Session not found.")
         raise HTTPException(status_code=409, detail=f"This session is read-only ({session.get('read_only_reason')}).")
     return TurnStartResult(session_id=session_id, status="running" if agent_loop.is_running(session_id) else "queued")
+
+
+@router.post("/sessions/{session_id}/stop", response_model=TurnStartResult)
+async def stop_session(session_id: str, user: AuthedUser = Depends(verified_user)):
+    """The Stop button: cancel the turn running in this session (services/turn_control.py says exactly what that does and
+    does not undo). 409 when nothing is running — usually the turn ended a moment before the click."""
+    outcome = await turn_control.stop_turn(session_id, user.user_id)
+    if outcome == "not_found":
+        raise HTTPException(status_code=404, detail="Session not found.")
+    if outcome == "not_running":
+        raise HTTPException(status_code=409, detail="Nothing is running in this session.")
+    if outcome == "not_stopped":
+        raise HTTPException(status_code=500, detail="The turn did not stop when asked. Try again in a moment.")
+    return TurnStartResult(session_id=session_id, status="stopped")
 
 
 @router.get("/sessions/{session_id}/events", response_model=list[SessionEventOut])
@@ -200,7 +216,12 @@ async def stream_session(session_id: str, request: Request, after_id: int | None
 
     Single-process only: this fans out from the same in-memory registry
     agent_loop.py's `_subscribers` uses, which doesn't survive a restart or
-    span multiple backend instances — see /docs/PHASE3_NOTES.md."""
+    span multiple backend instances — see /docs/PHASE3_NOTES.md.
+
+    Besides `event` and `status` frames it sends EPHEMERAL ones while the model is working (see services/live_text.py):
+    `delta` (more text of the reply so far) and `thinking` (more of its thinking so far) — `replace: true` on the first
+    one after a reconnect carries everything so far — and `reset` (discard both: the reply is being retried, or the call
+    failed). They are never stored; the finished reply and the saved thinking arrive as ordinary `event`s and replace them."""
     # Subscribe BEFORE fetching history, not after — subscribing after the
     # fetch would leave a real gap where an event appended between the fetch
     # and the subscribe call lands in neither the catch-up burst nor the live
@@ -216,11 +237,16 @@ async def stream_session(session_id: str, request: Request, after_id: int | None
         raise HTTPException(status_code=404, detail="Session not found.")
 
     last_history_id = history[-1]["id"] if history else (after_id or 0)
+    # A viewer who connects (or reconnects) while the model is mid-reply is first given the text so far. Deltas already
+    # inside that snapshot are recognised by their sequence number and skipped, so nothing is applied twice.
+    viewer = live_text.LiveViewer(live_text.snapshot(session_id), live_text.snapshot(session_id, live_text.THINKING))
 
     async def event_stream():
         try:
             for row in history:
                 yield _sse_format("event", _event_out(row).model_dump(mode="json"))
+            for first_frame in viewer.first_frames:
+                yield _sse_format(*first_frame)
             while True:
                 if await request.is_disconnected():
                     break
@@ -229,10 +255,15 @@ async def stream_session(session_id: str, request: Request, after_id: int | None
                 except asyncio.TimeoutError:
                     yield ": keep-alive\n\n"
                     continue
-                if payload.get("event_type") == "__session_status__":
+                kind = payload.get("event_type")
+                if kind == "__session_status__":
                     yield _sse_format("status", {"status": payload["status"]})
                     if payload["status"] in ("completed", "failed", "stuck", "waiting_approval"):
                         break
+                elif live_text.is_live_payload(payload):
+                    frame = viewer.frame_for(payload)  # None for a delta the snapshot above already contained
+                    if frame:
+                        yield _sse_format(*frame)
                 else:
                     if payload["id"] <= last_history_id:
                         continue  # already sent as part of the catch-up burst above — avoid a duplicate
@@ -264,5 +295,6 @@ async def resolve_approval(approval_id: str, body: ApprovalDecision, user: Authe
     was_pending = existing["status"] == "pending"
     row = await approval_requests_repo.resolve_owned(user.user_id, approval_id, body.approved)
     if was_pending:
-        await agent_loop.resume_after_approval(row["session_id"], user.user_id)
+        with live_text.streaming_for(row["session_id"]):
+            await agent_loop.resume_after_approval(row["session_id"], user.user_id)
     return _approval_out(row)

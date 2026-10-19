@@ -11,12 +11,14 @@ import type { SessionEvent } from "./types";
  *   tool_result                        — system; parent_event_id → the tool_call; { ok, content, error }
  *   approval_request                   — system; parent → the tool_call; { approval_request_id, action_type, payload }
  *   approval_response                  — user;   parent → the approval_request; { approved }
+ *   thinking                           — agent; { text } — the model's thinking before a reply/step (never sent back to it)
  *   error, stuck_notice                — system notices
  *   project_knowledge_injected, condensation_summary — bookkeeping; never shown
  */
 export type Row =
   | { kind: "user"; id: number; text: string; interrupt: boolean; attachments: RowAttachment[] }
   | { kind: "agent"; id: number; text: string }
+  | { kind: "thinking"; id: number; text: string }
   | { kind: "tool"; id: number; name: string; arguments: Record<string, unknown>; result: { ok: boolean; content: string; error: string | null } | null }
   | { kind: "approval"; id: number; approvalId: string; actionType: string; payload: Record<string, unknown>; answered: boolean | null }
   | { kind: "error"; id: number; text: string }
@@ -63,6 +65,9 @@ export function buildRows(events: SessionEvent[]): Row[] {
         break;
       case "user_interrupt":
         rows.push({ kind: "user", id: e.id, text: str(c.text), interrupt: true, attachments: rowAttachments(c) });
+        break;
+      case "thinking":
+        if (str(c.text)) rows.push({ kind: "thinking", id: e.id, text: str(c.text) });
         break;
       case "tool_call": {
         const r = results.get(e.id);
@@ -114,8 +119,9 @@ export type Item =
 /**
  * Fold the agent's work into activity groups.
  *
- * Folded:  tool calls, and agent text that is followed by another tool call in the same turn
- *          ("Now let me check the CDN URLs…" — narration, not an answer).
+ * Folded:  tool calls, and agent text or thinking that is followed by another tool call in the same turn
+ *          ("Now let me check the CDN URLs…" — narration, not an answer). Thinking with no tool call after it
+ *          (the thinking behind the final reply) stays visible, collapsed, just above that reply.
  * Visible: the person's own messages; the agent's text once no tool call follows it (that is the
  *          reply); approvals, answered or not (the person must see what was asked and decided);
  *          errors; "stuck" notices.
@@ -131,7 +137,7 @@ export function groupRows(rows: Row[]): Item[] {
   for (let i = rows.length - 1; i >= 0; i--) {
     const r = rows[i];
     if (r.kind === "user") toolAhead = false;
-    folded[i] = r.kind === "tool" || (r.kind === "agent" && toolAhead);
+    folded[i] = r.kind === "tool" || ((r.kind === "agent" || r.kind === "thinking") && toolAhead);
     if (r.kind === "tool") toolAhead = true;
   }
 

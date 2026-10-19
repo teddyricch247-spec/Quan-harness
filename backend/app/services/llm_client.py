@@ -22,12 +22,16 @@ production, the same instruction /docs/YOUR_SETUP_CHECKLIST.md already gives
 for the Fly integration.
 """
 import asyncio
+import json
 import logging
 import re
+import time
+import uuid
 from dataclasses import dataclass, field
+from typing import Callable
 
 from app.repositories import llm_credentials as llm_credentials_repo
-from app.services import provider_catalog, vault
+from app.services import live_text, provider_catalog, vault
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +44,9 @@ DEFAULT_MAX_COMPLETION_TOKENS = 8192
 # given more room — but never more than this, and never more than the model's own cap.
 THINKING_MAX_COMPLETION_TOKENS = 24_576
 THINKING_ANSWER_HEADROOM = 4096  # room left for the answer / tool call on top of a raw thinking budget
+# Streaming: providers send the reply in tiny chunks (often one token each). They are coalesced into text deltas at most
+# this often, so a viewer gets about 25 updates a second instead of one per token.
+STREAM_FLUSH_SECONDS = 0.04
 
 
 class NoLlmCredentialError(RuntimeError):
@@ -296,16 +303,219 @@ def _apply_prompt_caching(messages: list[dict], credential: ResolvedCredential) 
     return [{"role": "system", "content": cached_system}, *messages[1:]]
 
 
+# ---------------------------------------------------------------------------
+# Streaming (word-by-word replies). See live_text.py for the whole picture.
+# ---------------------------------------------------------------------------
+
+
+def _is_main_agent_call(messages: list[dict]) -> bool:
+    """True for the agent loop's own turn call, the only one whose text a person is watching: its system message starts
+    with the harness's static system prompt (the same recognition `_apply_prompt_caching` relies on). A compaction summary
+    (empty system text), a memory-extraction call and a delegated sub-task (their own system prompts) are not it."""
+    if not messages:
+        return False
+    first = messages[0]
+    if first.get("role") != "system" or not isinstance(first.get("content"), str):
+        return False
+    from app.services import system_prompt
+
+    return first["content"].startswith(system_prompt.assemble_static())
+
+
+def _live_sink_for(messages: list[dict]):
+    """A LiveSink when this call should stream to someone's screen: the request that started the turn bound its session
+    (live_text.streaming_for) AND this is the main agent call. None otherwise — the call then behaves exactly as before."""
+    session_id = live_text.bound_session()
+    if session_id is None or not _is_main_agent_call(messages):
+        return None
+    return live_text.sink(session_id)
+
+
+@dataclass
+class _StreamProgress:
+    """What one call_llm has seen of its stream, shared across its retry attempts."""
+
+    streaming: bool
+    use_stream_options: bool = True  # `stream_options` (usage in the last chunk) is dropped if the provider rejects it
+    emitted: bool = False  # some text already reached the viewer in the current attempt
+    chunks: int = 0  # provider chunks received in the current attempt (0 = the stream never started)
+
+
+class _ToolCallAssembler:
+    """Rebuilds whole tool calls from the fragments a stream delivers: an id and a name once, the JSON arguments in pieces.
+    Tolerates the usual provider quirks: a call that arrives in one chunk, a name sent in fragments, a missing id, and
+    parallel calls that are all numbered index 0 (told apart by their ids)."""
+
+    def __init__(self) -> None:
+        self._slots: list[dict] = []
+        self._by_index: dict[int, int] = {}
+
+    def add(self, delta) -> None:
+        raw_index = getattr(delta, "index", None)
+        index = raw_index if isinstance(raw_index, int) else 0
+        call_id = getattr(delta, "id", None) or ""
+        function = getattr(delta, "function", None)
+        name = getattr(function, "name", None) or ""
+        arguments = getattr(function, "arguments", None) or ""
+        slot_index = self._by_index.get(index)
+        if slot_index is not None and call_id and self._slots[slot_index]["id"] and call_id != self._slots[slot_index]["id"]:
+            slot_index = None  # same index, different id: a new call (some providers number every call 0)
+        if slot_index is None:
+            self._slots.append({"id": "", "name": "", "args": ""})
+            slot_index = len(self._slots) - 1
+            self._by_index[index] = slot_index
+        slot = self._slots[slot_index]
+        if call_id and not slot["id"]:
+            slot["id"] = call_id
+        if name:
+            if not slot["name"]:
+                slot["name"] = name
+            elif name != slot["name"]:
+                slot["name"] += name  # a name streamed in fragments
+        if isinstance(arguments, str) and arguments:
+            slot["args"] += arguments
+
+    def build(self) -> list[ToolCall]:
+        calls = []
+        for position, slot in enumerate(self._slots):
+            if not slot["name"]:
+                continue
+            try:
+                parsed = json.loads(slot["args"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                parsed = {}
+            calls.append(ToolCall(id=slot["id"] or f"call_{uuid.uuid4().hex[:12]}_{position}", name=slot["name"], arguments=parsed if isinstance(parsed, dict) else {}))
+        return calls
+
+
+async def consume_stream(
+    stream,
+    deliver: Callable[[str], None] | None = None,
+    progress: "_StreamProgress | None" = None,
+    deliver_thinking: Callable[[str], None] | None = None,
+) -> LlmResponse:
+    """Read a litellm stream to its end and return the ONE complete LlmResponse — the same shape a non-streamed call gives.
+    `deliver(text)` is handed the reply's text as it arrives, coalesced to at most one call per STREAM_FLUSH_SECONDS; text
+    that precedes a tool call is delivered before the call is read, so it never waits on a long tool-argument stream.
+    `deliver_thinking(text)` is the same for the model's thinking, which is always delivered before the reply's text."""
+    text_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    calls = _ToolCallAssembler()
+    finish_reason = None
+    usage = None
+    pending = ""
+    last_flush = 0.0  # so the FIRST piece of text goes out at once; only the pieces after it are coalesced
+    thinking_pending = ""
+    thinking_last_flush = 0.0
+
+    def flush(force: bool) -> None:
+        nonlocal pending, last_flush
+        if pending and deliver is not None and (force or time.monotonic() - last_flush >= STREAM_FLUSH_SECONDS):
+            piece, pending = pending, ""
+            last_flush = time.monotonic()
+            deliver(piece)
+
+    def flush_thinking(force: bool) -> None:
+        nonlocal thinking_pending, thinking_last_flush
+        if thinking_pending and deliver_thinking is not None and (force or time.monotonic() - thinking_last_flush >= STREAM_FLUSH_SECONDS):
+            piece, thinking_pending = thinking_pending, ""
+            thinking_last_flush = time.monotonic()
+            deliver_thinking(piece)
+
+    async for chunk in stream:
+        if progress is not None:
+            progress.chunks += 1
+        chunk_usage = getattr(chunk, "usage", None)
+        if chunk_usage is not None:
+            usage = chunk_usage
+        choices = getattr(chunk, "choices", None) or []
+        if not choices:
+            continue
+        choice = choices[0]
+        delta = getattr(choice, "delta", None)
+        if delta is not None:
+            reasoning = _extract_reasoning(delta)
+            if reasoning:
+                reasoning_parts.append(reasoning)
+                thinking_pending += reasoning
+                flush_thinking(force=False)
+            piece = getattr(delta, "content", None)
+            if isinstance(piece, str) and piece:
+                flush_thinking(force=True)  # the thinking is over once the answer starts
+                text_parts.append(piece)
+                pending += piece
+                flush(force=False)
+            tool_deltas = getattr(delta, "tool_calls", None) or []
+            if tool_deltas:
+                flush_thinking(force=True)
+                flush(force=True)
+                for tool_delta in tool_deltas:
+                    calls.add(tool_delta)
+        if getattr(choice, "finish_reason", None):
+            finish_reason = choice.finish_reason
+    flush_thinking(force=True)
+    flush(force=True)
+
+    tool_calls = calls.build()
+    if finish_reason is None and not text_parts and not tool_calls:
+        raise RuntimeError("The provider's stream ended without any content.")  # a broken stream: let the retry loop retry it
+    return LlmResponse(
+        text="".join(text_parts),
+        tool_calls=tool_calls,
+        stop_reason=finish_reason,
+        input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+        output_tokens=getattr(usage, "completion_tokens", 0) or 0,
+        reasoning="".join(reasoning_parts),
+    )
+
+
+async def _stream_once(litellm_module, kwargs: dict, sink, progress: _StreamProgress, show_thinking: bool = True) -> LlmResponse:
+    request = {**kwargs, "stream": True}
+    if progress.use_stream_options:
+        request["stream_options"] = {"include_usage": True}
+    progress.chunks = 0
+    stream = await litellm_module.acompletion(**request)
+
+    def deliver(text: str) -> None:
+        progress.emitted = True
+        sink.delta(text)
+
+    def deliver_thinking(text: str) -> None:
+        progress.emitted = True
+        sink.thinking_delta(text)
+
+    return await consume_stream(stream, deliver, progress, deliver_thinking if show_thinking else None)
+
+
+def _looks_like_stream_unsupported(exc: Exception) -> bool:
+    """A provider/endpoint that can't stream at all (as opposed to a network blip or a bad key)."""
+    if getattr(exc, "status_code", None) not in (400, 422, 501):
+        return False
+    return bool(re.search(r"\bstream", str(exc), re.I))
+
+
 async def call_llm(
     messages: list[dict], tools: list[dict], credential: ResolvedCredential, *, tool_choice: str = "auto"
 ) -> LlmResponse:
     """§16.3: three attempts, exponential backoff (2s, 4s, 8s), inside this one
     call — the caller never retries a call_llm itself. Raises
     LlmCallFailedError after the third failure; the turn loop's job (not
-    this module's) is to turn that into session.status = 'failed'."""
+    this module's) is to turn that into session.status = 'failed'.
+
+    Streaming: when this is the agent loop's own turn call for a session whose request asked for live text
+    (live_text.streaming_for), the reply is requested as a stream and its text is handed to the viewer as it arrives; the
+    return value is still the ONE complete LlmResponse, identical in shape to a non-streamed call. If an attempt fails after
+    some text was already shown, the viewer is told to drop it before the retry starts the answer over. Every other call
+    (compaction, memory extraction, delegated sub-tasks, scheduled runs) is one request, one response, as before.
+
+    Thinking: the model's thinking text (when the provider returns it and the credential doesn't hide it) is streamed live the
+    same way and, when the call finishes, saved as one `thinking` event ahead of the reply's own event."""
     import litellm
 
     model_string = _litellm_model_string(credential)
+    sink = _live_sink_for(messages)  # decided on the messages as given, before prompt caching reshapes them
+    # The credential's own "show thinking" switch (llm_credentials.reasoning.show): off = neither shown live nor saved.
+    show_thinking = (credential.reasoning or {}).get("show") is not False
     messages = _apply_prompt_caching(messages, credential)
     reasoning_body = build_reasoning_body(credential)
     kwargs = {
@@ -336,12 +546,36 @@ async def call_llm(
         kwargs["extra_headers"] = credential.extra_headers
 
     last_error: Exception | None = None
+    progress = _StreamProgress(streaming=sink is not None)
     for attempt in range(MAX_RETRIES):
         try:
-            response = await litellm.acompletion(**kwargs)
-            return _normalize_response(response)
+            if progress.streaming:
+                response = await _stream_once(litellm, kwargs, sink, progress, show_thinking)
+            else:
+                response = _normalize_response(await litellm.acompletion(**kwargs))
+            if sink is not None:
+                if show_thinking and response.reasoning:
+                    await sink.save_thinking(response.reasoning)  # BEFORE the reply's own event, so the order reads right
+                sink.end()
+            return response
+        except asyncio.CancelledError:
+            if sink is not None:
+                sink.reset()
+            raise
         except Exception as exc:  # noqa: BLE001 — any provider/network failure is retried identically
             last_error = exc
+            if sink is not None and progress.emitted:
+                progress.emitted = False
+                sink.reset()  # the retry starts the answer over: the viewer must drop what it was shown
+            if progress.streaming:
+                if progress.use_stream_options and "stream_options" in str(exc):
+                    progress.use_stream_options = False
+                    logger.warning("%s/%s rejected stream_options; streaming without it", credential.provider, credential.model)
+                    continue
+                if progress.chunks == 0 and _looks_like_stream_unsupported(exc):
+                    progress.streaming = False
+                    logger.warning("%s/%s can't stream; falling back to a whole reply", credential.provider, credential.model)
+                    continue
             # A thinking level the model refuses must not take the whole turn down: retry
             # once, immediately, with the model's own default thinking instead.
             if _looks_like_reasoning_rejection(exc) and _strip_reasoning_level(kwargs):
@@ -352,6 +586,8 @@ async def call_llm(
                 continue
             if attempt < MAX_RETRIES - 1:
                 await asyncio.sleep(RETRY_BASE_DELAY_SECONDS * (2**attempt))
+    if sink is not None:
+        sink.reset()
     raise LlmCallFailedError(f"{credential.provider}/{credential.model}: {last_error}") from last_error
 
 

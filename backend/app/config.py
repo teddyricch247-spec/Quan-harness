@@ -36,15 +36,21 @@ class Settings(BaseSettings):
     # Comma-separated litellm model strings (e.g. "openrouter/some/model") you KNOW accept images, for models the
     # pinned litellm's capability table doesn't list. Pictures (a person's attachments, the browser's screenshots) are
     # only ever sent to a model that is confirmed to read them (litellm's table, or this list); a wrong entry makes the
-    # provider reject calls. See app/services/visual_qa.py and docs/PHASE6_NOTES.md.
+    # provider reject calls. A model that is NOT confirmed still gets the browser: its screenshot tool returns a text
+    # outline of the page instead of a picture. See app/services/visual_qa.py and docs/PHASE6_NOTES.md.
     agent_vision_models: str = ""
 
-    # §14.9. OFF by default: the agent's headless Chromium needs the browser installed on this host and a few hundred MB
-    # of RAM per live page. See docs/YOUR_SETUP_CHECKLIST.md §3c before turning it on.
-    agent_browser_enabled: bool = False
+    # §14.9. ON by default. The real opt-in is installing the browser: if Playwright isn't installed on this host the
+    # browser tools are simply not offered (the agent is told, nobody is shown an error). The Docker image in
+    # backend/Dockerfile installs Chromium; the plain Python runtime does not. See docs/BROWSER_SETUP.md. Set
+    # AGENT_BROWSER_ENABLED=false to switch it off on a host that has Chromium.
+    agent_browser_enabled: bool = True
     # Extra hosts (beyond the project's own preview and a short list of font/script CDNs) the agent's browser may reach:
     # comma-separated exact hosts or *.domain wildcards. IPs, localhost and this deployment's own domains are rejected.
     agent_browser_allowed_hosts: str = ""
+    # How many browser pages stay open at once, across all sessions. Each costs Chromium memory; the least recently used
+    # is closed to make room. A 512 MB instance cannot hold Chromium at all; 2 GB holds one or two comfortably.
+    agent_browser_max_pages: int = 2
 
     frontend_url: str = "http://localhost:3000"
     backend_public_url: str = "http://localhost:8000"
